@@ -102,6 +102,20 @@ def _print_discovery_diagnostics(state: dict) -> None:
 
 
 def _prompt_for_configuration(tool: str | None = None) -> tuple[str, str | None]:
+    if not sys.stdin.isatty():
+        # Happens with `curl ... | sh` (stdin is the piped script) or any
+        # unattended run. Fail with the exact non-interactive incantation
+        # instead of the bare "Input is not a terminal / Aborted." from the
+        # picker.
+        raise RuntimeError(
+            "ucode needs a Databricks workspace, but this run is not interactive "
+            "(no terminal on stdin).\n"
+            "Re-run inside a terminal, or supply the workspace non-interactively:\n"
+            "  ucode setup --workspaces https://your-workspace.cloud.databricks.com\n"
+            "  ucode setup --profile YOUR_PROFILE\n"
+            "For unattended/workshop installs, set UCODE_WORKSPACES (and optionally "
+            "UCODE_PROFILE) before running the installer."
+        )
     if tool is None:
         desc = "Configure your Databricks workspace"
     else:
@@ -354,7 +368,16 @@ def configure_workspace_command(
         _print_discovery_diagnostics(state)
         return 1
 
-    if selected_tools is None:
+    if selected_tools is None and not sys.stdin.isatty():
+        # Non-interactive (e.g. unattended install with --workspaces but no
+        # --agents): configure everything available rather than aborting at the
+        # picker. Pass --agents to choose a subset.
+        picked = available_on_workspace
+        print_note(
+            "Non-interactive run — configuring all available agents: "
+            + ", ".join(TOOL_SPECS[t]["display"] for t in picked)
+        )
+    elif selected_tools is None:
         picked = prompt_for_tools([(t, TOOL_SPECS[t]["display"]) for t in available_on_workspace])
     else:
         unavailable_tools = [

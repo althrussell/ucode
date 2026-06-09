@@ -589,6 +589,32 @@ class TestConfigureAgentFlag:
         mock_cfg.assert_not_called()
 
 
+class TestNonInteractivePrompt:
+    def test_prompt_for_configuration_fails_clearly_without_tty(self, monkeypatch):
+        """`curl | sh` / unattended runs have no terminal on stdin; the picker
+        must raise an actionable RuntimeError instead of aborting opaquely."""
+        import ucode.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod.sys.stdin, "isatty", lambda: False)
+        with pytest.raises(RuntimeError) as exc:
+            cli_mod._prompt_for_configuration()
+        msg = str(exc.value)
+        assert "--workspaces" in msg
+        assert "UCODE_WORKSPACES" in msg
+
+    def test_prompt_for_configuration_prompts_with_tty(self, monkeypatch):
+        import ucode.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(cli_mod, "list_all_databricks_profiles", lambda: [])
+        monkeypatch.setattr(
+            cli_mod,
+            "prompt_for_workspace",
+            lambda desc, profiles: ("https://ws.databricks.com", None),
+        )
+        assert cli_mod._prompt_for_configuration() == ("https://ws.databricks.com", None)
+
+
 class TestConfigureAgentsSelection:
     def test_selected_tools_skip_picker(self, monkeypatch):
         import ucode.cli as cli_mod
@@ -669,6 +695,9 @@ class TestConfigureAgentsSelection:
         monkeypatch.setattr(cli_mod, "configure_shared_state", fake_configure_shared_state)
         monkeypatch.setattr(cli_mod, "save_state", lambda state: saved.append(state["workspace"]))
         monkeypatch.setattr(cli_mod, "check_gateway_endpoint", lambda state, tool: True)
+        # Simulate an interactive terminal so the tool picker runs (under pytest
+        # stdin is not a tty, which would otherwise auto-select all agents).
+        monkeypatch.setattr(cli_mod.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(cli_mod, "prompt_for_tools", lambda available: ["codex"])
         monkeypatch.setattr(cli_mod, "install_tool_binary", lambda *args, **kwargs: True)
         monkeypatch.setattr(
