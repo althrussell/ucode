@@ -214,6 +214,7 @@ ucode doctor --fix
 | Script "cannot be loaded because running scripts is disabled" | Use the `-ExecutionPolicy Bypass` one-liner exactly as shown. |
 | TLS / download errors on older Windows | The script forces TLS 1.2; if a proxy strips it, set the proxy to allow TLS 1.2. |
 | Corporate proxy / SSL inspection blocks downloads | Set `$env:HTTPS_PROXY`/`$env:HTTP_PROXY`; import the proxy CA into the Windows cert store. |
+| `ucode` not recognized in a **new** terminal (worked during install) | The bin dir wasn't persisted to your user PATH. Run once: `[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';' + (Join-Path $env:USERPROFILE '.local\bin'), 'User')`, then open a new terminal. (The current installer does this automatically.) |
 | `ucode` / `databricks` not found | `uv tool update-shell`, open a new window; or run `ucode setup`. |
 | Node too old | `ucode doctor --fix` or `winget install OpenJS.NodeJS`. |
 | `npm` permission errors | Reinstall Node via `winget` (per-user) so global installs don't need admin. |

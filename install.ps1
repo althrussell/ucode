@@ -33,6 +33,24 @@ function Write-Info($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Write-Warn($m) { Write-Host "!   $m" -ForegroundColor Yellow }
 function Test-HasCommand($c) { [bool](Get-Command $c -ErrorAction SilentlyContinue) }
 
+# Persist a directory onto the *user* PATH (registry) so NEW terminals find the
+# tools we install, and add it to the current process too. This is the critical
+# fix for "ucode is not recognized" in a fresh shell: uv only persists its bin
+# dir to PATH when it isn't already on the *process* PATH, so once this script
+# prepends it for its own use, uv skips the persistent write — we must do it.
+function Add-ToUserPath($dir) {
+  if (-not $dir -or -not (Test-Path $dir)) { return }
+  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+  if (-not $userPath) { $userPath = '' }
+  $entries = $userPath.Split(';') | Where-Object { $_ -ne '' }
+  if ($entries -notcontains $dir) {
+    $newPath = if ($userPath) { "$userPath;$dir" } else { $dir }
+    [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+    Write-Info "Added $dir to your user PATH (new terminals will see it)."
+  }
+  if (($env:Path.Split(';')) -notcontains $dir) { $env:Path = "$dir;$env:Path" }
+}
+
 # 1. Ensure uv (install if missing, else best-effort self-update).
 if (Test-HasCommand 'uv') {
   Write-Info 'uv is present; updating to latest (best-effort)'
@@ -42,9 +60,9 @@ if (Test-HasCommand 'uv') {
   irm https://astral.sh/uv/install.ps1 | iex
 }
 
-# Make uv visible in THIS session (its installer wires future sessions).
+# Make uv visible in THIS session AND persist its bin dir for future sessions.
 $uvBin = Join-Path $env:USERPROFILE '.local\bin'
-if (Test-Path $uvBin) { $env:Path = "$uvBin;$env:Path" }
+Add-ToUserPath $uvBin
 
 if (-not (Test-HasCommand 'uv')) {
   throw 'uv was installed but is not on PATH. Open a new terminal and re-run this installer.'
@@ -66,6 +84,9 @@ uv tool install --force --python $pyver "ucode @ $repo/archive/$ref.tar.gz"
 try { uv tool update-shell | Out-Null } catch {}
 $binDir = $null
 try { $binDir = (uv tool dir --bin).Trim() } catch {}
+# Persist the uv tool bin dir too (it may differ from ~/.local\bin), so a fresh
+# terminal can find `ucode` without re-running anything.
+Add-ToUserPath $binDir
 if ($binDir -and (Test-Path (Join-Path $binDir 'ucode.exe'))) {
   $ucode = Join-Path $binDir 'ucode.exe'
 } elseif (Test-HasCommand 'ucode') {
