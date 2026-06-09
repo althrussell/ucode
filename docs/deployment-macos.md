@@ -35,11 +35,13 @@ This installs/updates `uv`, provisions Python 3.12, installs the latest `ucode`,
 then runs `ucode setup` to update remaining dependencies and configure your
 agents.
 
-> Use the `sh -c "$(curl …)"` form shown above, **not** `curl … | sh`. The
-> `sh -c` form keeps your terminal attached to stdin so the interactive
-> workspace picker works. With `curl … | sh`, stdin is the piped script, so
-> `ucode setup` runs non-interactively and will ask you to pass `--workspaces`
-> (or set `UCODE_WORKSPACES`).
+> Prefer the `sh -c "$(curl …)"` form shown above. It keeps your terminal
+> attached to stdin, so the installer configures your workspace interactively in
+> one go. With `curl … | sh` the installer can't prompt, so it installs all
+> dependencies and then asks you to finish with `ucode claude` in a new terminal
+> (which is perfectly fine — just one extra step). For unattended installs, set
+> `UCODE_WORKSPACES` (and optionally `UCODE_PROFILE`) and either form runs fully
+> non-interactively.
 
 Notes:
 

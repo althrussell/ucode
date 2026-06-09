@@ -71,10 +71,25 @@ if ($binDir -and (Test-Path (Join-Path $binDir 'ucode.exe'))) {
 }
 
 # 5. Provision dependencies + configure + validate via `ucode setup`.
-$setupArgs = @('setup')
-if ($env:UCODE_AGENTS)     { $setupArgs += @('--agents', $env:UCODE_AGENTS) }
-if ($env:UCODE_PROFILE)    { $setupArgs += @('--profile', $env:UCODE_PROFILE) }
-if ($env:UCODE_WORKSPACES) { $setupArgs += @('--workspaces', $env:UCODE_WORKSPACES) }
+#
+# Configuration prompts for a workspace, which needs a real console on stdin.
+# With env inputs (workshop/unattended) we configure non-interactively; with an
+# interactive console we configure with prompts; otherwise we install
+# dependencies only and tell the user to finish with `ucode claude`.
 Write-Info 'Running ucode setup'
-& $ucode @setupArgs
-exit $LASTEXITCODE
+$hasInputs = $env:UCODE_AGENTS -or $env:UCODE_PROFILE -or $env:UCODE_WORKSPACES
+if ($hasInputs) {
+  $setupArgs = @('setup')
+  if ($env:UCODE_AGENTS)     { $setupArgs += @('--agents', $env:UCODE_AGENTS) }
+  if ($env:UCODE_PROFILE)    { $setupArgs += @('--profile', $env:UCODE_PROFILE) }
+  if ($env:UCODE_WORKSPACES) { $setupArgs += @('--workspaces', $env:UCODE_WORKSPACES) }
+  & $ucode @setupArgs
+  exit $LASTEXITCODE
+} elseif (-not [Console]::IsInputRedirected) {
+  & $ucode setup
+  exit $LASTEXITCODE
+} else {
+  & $ucode setup --skip-configure
+  Write-Host "`n==> ucode is installed. Open a NEW terminal and run:  ucode claude" -ForegroundColor Green
+  exit 0
+}

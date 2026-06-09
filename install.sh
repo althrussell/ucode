@@ -82,14 +82,24 @@ else
 fi
 
 # 5. Provision dependencies + configure + validate via `ucode setup`.
-#
-# IMPORTANT: invoke this script as `sh -c "$(curl -fsSL <url>)"` (see the README),
-# NOT `curl ... | sh`. The former leaves stdin attached to your terminal so the
-# interactive workspace picker works; the latter makes stdin the piped script,
-# and ucode setup will then print non-interactive guidance instead of prompting.
 info "Running ucode setup"
 set --
 [ -n "${UCODE_AGENTS:-}" ]     && set -- "$@" --agents "${UCODE_AGENTS}"
 [ -n "${UCODE_PROFILE:-}" ]    && set -- "$@" --profile "${UCODE_PROFILE}"
 [ -n "${UCODE_WORKSPACES:-}" ] && set -- "$@" --workspaces "${UCODE_WORKSPACES}"
-exec "${UCODE_BIN}" setup "$@"
+
+# Decide whether to configure interactively. Configuration needs to prompt for a
+# workspace, which requires a real terminal on stdin. When inputs are supplied
+# via env vars (workshop/unattended) we configure non-interactively. When stdin
+# is an interactive terminal (the `sh -c "$(curl ...)"` form) we configure with
+# prompts. Otherwise (e.g. `curl ... | sh`, CI) we install dependencies only and
+# tell the user to finish with `ucode claude` — no fragile TTY juggling.
+if [ -n "${UCODE_WORKSPACES:-}" ] || [ -n "${UCODE_PROFILE:-}" ] || [ -n "${UCODE_AGENTS:-}" ]; then
+  exec "${UCODE_BIN}" setup "$@"
+elif [ -t 0 ]; then
+  exec "${UCODE_BIN}" setup
+else
+  "${UCODE_BIN}" setup --skip-configure || true
+  printf '\n\033[1;32m==>\033[0m ucode is installed. Open a NEW terminal and run:  ucode claude\n'
+  exit 0
+fi

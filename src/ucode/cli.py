@@ -778,6 +778,14 @@ def setup_cmd(
             help="Skip dependency upgrades (still installs anything missing).",
         ),
     ] = False,
+    skip_configure: Annotated[
+        bool,
+        typer.Option(
+            "--skip-configure",
+            help="Only install/upgrade dependencies; skip the workspace/agent "
+            "configuration prompt. Used by the installer when run non-interactively.",
+        ),
+    ] = False,
     verbose: Annotated[
         str, typer.Option("--verbose", help="Output verbosity: 'normal' or 'low'.")
     ] = "normal",
@@ -788,6 +796,8 @@ def setup_cmd(
     Used by the bootstrap one-liner and safe to re-run any time. Fully
     non-interactive when --agents/--profile/--workspaces are supplied (the
     workshop one-command path); otherwise prompts only for what's missing.
+    Pass --skip-configure to provision dependencies without touching the
+    workspace configuration (the user finishes later with `ucode claude`).
     """
     if verbose not in ("normal", "low"):
         print_err("--verbose must be one of: normal, low.")
@@ -800,6 +810,7 @@ def setup_cmd(
             agents=agents,
             tracing=tracing,
             skip_upgrade=skip_upgrade,
+            skip_configure=skip_configure,
         )
     except KeyboardInterrupt:
         print_err("Interrupted.")
@@ -814,6 +825,7 @@ def _run_setup(
     agents: str | None,
     tracing: bool,
     skip_upgrade: bool,
+    skip_configure: bool = False,
 ) -> int:
     """Orchestrate dependency provisioning + configuration, aggregating failures.
 
@@ -844,31 +856,41 @@ def _run_setup(
     # 3. Configure + validate the requested agents.
     selected_tools: list[str] | None = None
     configured_ok = True
-    try:
-        selected_tools = _parse_agents_option(agents) if agents else None
-        workspace_entries = _resolve_workspace_entries(workspaces, profile)
-        if selected_tools is not None:
-            configure_workspace_command(
-                selected_tools=selected_tools,
-                workspaces=workspace_entries,
-                prompt_optional_updates=prompt_optional_updates,
-            )
-        else:
-            configure_workspace_command(
-                workspaces=workspace_entries,
-                prompt_optional_updates=prompt_optional_updates,
-            )
-        if tracing:
-            tracing_workspaces = workspace_entries
-            if tracing_workspaces is None:
-                current = load_full_state().get("current_workspace")
-                tracing_workspaces = [(current, profile)] if current else None
-            if tracing_workspaces:
-                configure_tracing_command(workspaces=tracing_workspaces)
-        results.append(("Configure agents", True, ""))
-    except RuntimeError as exc:
-        configured_ok = False
-        results.append(("Configure agents", False, str(exc)))
+    # Only skip when nothing to configure non-interactively was supplied; an
+    # explicit --workspaces/--profile/--agents still configures even with
+    # --skip-configure (so workshop one-liners keep working).
+    configure_skipped = skip_configure and not (workspaces or profile or agents)
+    if configure_skipped:
+        print_note(
+            "Dependencies are ready. Skipping interactive configuration — "
+            "finish by running `ucode claude` (or `ucode setup`) in your terminal."
+        )
+    else:
+        try:
+            selected_tools = _parse_agents_option(agents) if agents else None
+            workspace_entries = _resolve_workspace_entries(workspaces, profile)
+            if selected_tools is not None:
+                configure_workspace_command(
+                    selected_tools=selected_tools,
+                    workspaces=workspace_entries,
+                    prompt_optional_updates=prompt_optional_updates,
+                )
+            else:
+                configure_workspace_command(
+                    workspaces=workspace_entries,
+                    prompt_optional_updates=prompt_optional_updates,
+                )
+            if tracing:
+                tracing_workspaces = workspace_entries
+                if tracing_workspaces is None:
+                    current = load_full_state().get("current_workspace")
+                    tracing_workspaces = [(current, profile)] if current else None
+                if tracing_workspaces:
+                    configure_tracing_command(workspaces=tracing_workspaces)
+            results.append(("Configure agents", True, ""))
+        except RuntimeError as exc:
+            configured_ok = False
+            results.append(("Configure agents", False, str(exc)))
 
     # 4. Validation pass via doctor (read-only).
     from ucode.doctor import run_doctor
@@ -890,7 +912,20 @@ def _run_setup(
             print_success(name)
         else:
             print_err(f"{name}: {detail}")
-    critical_ok = all(ok for _name, ok, _detail in results) and configured_ok
+    deps_ok = all(ok for _name, ok, _detail in results)
+    if configure_skipped:
+        # Dependency-only run (non-interactive installer): success means the
+        # deps installed. The user configures their workspace next, in a
+        # terminal, with `ucode claude`.
+        if deps_ok:
+            print_success(
+                "Dependencies installed. Open a new terminal and run `ucode claude` "
+                "to connect your Databricks workspace."
+            )
+            return 0
+        print_note("Re-run the installer after addressing the issues above; it is safe to repeat.")
+        return 1
+    critical_ok = deps_ok and configured_ok
     if critical_ok and doctor_rc == 0:
         print_success("ucode is ready. Launch an agent with `ucode claude` (or codex/gemini/...).")
         return 0

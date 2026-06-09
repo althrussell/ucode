@@ -589,6 +589,58 @@ class TestConfigureAgentFlag:
         mock_cfg.assert_not_called()
 
 
+class TestSetupSkipConfigure:
+    def test_skip_configure_installs_deps_and_skips_picker(self, monkeypatch):
+        import ucode.cli as cli_mod
+        import ucode.doctor as doctor_mod
+
+        monkeypatch.setattr(cli_mod, "install_databricks_cli", lambda: None)
+        monkeypatch.setattr(cli_mod, "ensure_databricks_cli_latest", lambda: None)
+        monkeypatch.setattr(cli_mod, "ensure_node_npm", lambda: None)
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_workspace_command",
+            lambda *a, **k: pytest.fail("configure must be skipped"),
+        )
+        monkeypatch.setattr(doctor_mod, "run_doctor", lambda **kwargs: 0)
+
+        rc = cli_mod._run_setup(
+            profile=None,
+            workspaces=None,
+            agents=None,
+            tracing=False,
+            skip_upgrade=False,
+            skip_configure=True,
+        )
+        assert rc == 0
+
+    def test_skip_configure_ignored_when_workspaces_supplied(self, monkeypatch):
+        import ucode.cli as cli_mod
+        import ucode.doctor as doctor_mod
+
+        configure_calls: list[dict] = []
+        monkeypatch.setattr(cli_mod, "install_databricks_cli", lambda: None)
+        monkeypatch.setattr(cli_mod, "ensure_databricks_cli_latest", lambda: None)
+        monkeypatch.setattr(cli_mod, "ensure_node_npm", lambda: None)
+        monkeypatch.setattr(
+            cli_mod,
+            "configure_workspace_command",
+            lambda **kwargs: configure_calls.append(kwargs) or 0,
+        )
+        monkeypatch.setattr(doctor_mod, "run_doctor", lambda **kwargs: 0)
+
+        rc = cli_mod._run_setup(
+            profile=None,
+            workspaces="https://ws.databricks.com",
+            agents=None,
+            tracing=False,
+            skip_upgrade=False,
+            skip_configure=True,
+        )
+        assert rc == 0
+        assert configure_calls, "explicit --workspaces must still configure"
+
+
 class TestNonInteractivePrompt:
     def test_prompt_for_configuration_fails_clearly_without_tty(self, monkeypatch):
         """`curl | sh` / unattended runs have no terminal on stdin; the picker
