@@ -97,7 +97,12 @@ def windows_safe_args(args: list[str]) -> list[str]:
         return args
     if resolved.lower().endswith(_BATCH_SUFFIXES):
         comspec = os.environ.get("COMSPEC", "cmd.exe")
-        return [comspec, "/d", "/s", "/c", resolved, *args[1:]]
+        # NOTE: no ``/s``. With ``/s`` cmd.exe always strips the first and last
+        # quote on the line, which mangles a quoted interpreter path that
+        # contains spaces (e.g. ``C:\Program Files\nodejs\npm.cmd`` → cmd tries
+        # to run ``C:\Program``). Without ``/s``, cmd.exe preserves the quotes
+        # around a single quoted executable path, which is exactly what we need.
+        return [comspec, "/d", "/c", resolved, *args[1:]]
     return [resolved, *args[1:]]
 
 

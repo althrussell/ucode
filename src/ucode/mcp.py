@@ -105,7 +105,7 @@ def add_claude_mcp_server(name: str, entry: dict, scope: str = MCP_USER_SCOPE) -
             text=True,
             timeout=30,
         )
-    except subprocess.CalledProcessError as exc:
+    except (subprocess.CalledProcessError, OSError) as exc:
         raise RuntimeError(f"Failed to add MCP server '{name}' via claude CLI.") from exc
 
 
@@ -134,6 +134,9 @@ def remove_claude_mcp_server(name: str, scope: str) -> bool:
         if _is_missing_mcp_server_output(output):
             return False
         raise RuntimeError(f"Failed to remove MCP server '{name}' via claude CLI.") from exc
+    except OSError as exc:
+        # `claude` isn't installed/resolvable — nothing to remove.
+        raise RuntimeError(f"claude CLI not available to remove MCP server '{name}'.") from exc
 
 
 def add_codex_mcp_server(name: str, url: str) -> None:
@@ -156,7 +159,7 @@ def add_codex_mcp_server(name: str, url: str) -> None:
             text=True,
             timeout=30,
         )
-    except subprocess.CalledProcessError as exc:
+    except (subprocess.CalledProcessError, OSError) as exc:
         raise RuntimeError(f"Failed to add MCP server '{name}' via codex CLI.") from exc
 
 
@@ -171,6 +174,8 @@ def remove_codex_mcp_server(name: str) -> bool:
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"Timed out removing MCP server '{name}' via codex CLI.") from exc
+    except OSError as exc:
+        raise RuntimeError(f"codex CLI not available to remove MCP server '{name}'.") from exc
 
     output = f"{result.stderr or ''}\n{result.stdout or ''}"
     if _is_missing_mcp_server_output(output):
@@ -203,7 +208,7 @@ def add_gemini_mcp_server(name: str, url: str) -> None:
             text=True,
             timeout=30,
         )
-    except subprocess.CalledProcessError as exc:
+    except (subprocess.CalledProcessError, OSError) as exc:
         raise RuntimeError(f"Failed to add MCP server '{name}' via gemini CLI.") from exc
 
 
@@ -218,6 +223,8 @@ def remove_gemini_mcp_server(name: str) -> bool:
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"Timed out removing MCP server '{name}' via gemini CLI.") from exc
+    except OSError as exc:
+        raise RuntimeError(f"gemini CLI not available to remove MCP server '{name}'.") from exc
 
     output = f"{result.stderr or ''}\n{result.stdout or ''}"
     if _is_missing_mcp_server_output(output):

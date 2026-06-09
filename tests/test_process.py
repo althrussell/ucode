@@ -43,16 +43,18 @@ class TestWindowsSafeArgs:
         )
         monkeypatch.setenv("COMSPEC", r"C:\Windows\System32\cmd.exe")
         out = windows_safe_args(["npm", "install", "-g", "claude"])
+        # No `/s`: it would make cmd.exe strip the quotes around a spaced
+        # interpreter path (C:\Program Files\...), breaking the invocation.
         assert out == [
             r"C:\Windows\System32\cmd.exe",
             "/d",
-            "/s",
             "/c",
             r"C:\Program Files\nodejs\npm.cmd",
             "install",
             "-g",
             "claude",
         ]
+        assert "/s" not in out
 
     def test_unresolved_name_left_untouched(self, monkeypatch):
         monkeypatch.setattr(process_mod.platform, "system", lambda: "Windows")
