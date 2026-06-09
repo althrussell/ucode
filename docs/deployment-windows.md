@@ -18,6 +18,7 @@ dependency chain, none of which you install manually:
 | Python 3.12 | `ucode` runtime | `uv python install 3.12` (never relies on system Python) |
 | Databricks CLI (latest) | Auth + token refresh | `winget install Databricks.DatabricksCLI --source winget`, upgraded if behind a GitHub release compare |
 | Node.js / npm | Installs the npm-distributed agent CLIs | `winget install OpenJS.NodeJS` (or nodejs.org MSI) |
+| Git for Windows (Claude Code only) | Claude Code shells out to Git Bash on Windows and won't start without `bash.exe` | `winget install Git.Git --source winget`; path pinned via `CLAUDE_CODE_GIT_BASH_PATH` |
 | Agent CLIs | The agents you launch | `npm install -g` per agent |
 | MLflow CLI (optional) | Only for Claude Code tracing | `uv tool install "ucode[tracing]"` path |
 
@@ -60,6 +61,11 @@ The installer is idempotent and self-healing:
 - **Missing or old Node.js:** installed/upgraded via `winget`
   (`OpenJS.NodeJS`), or from the nodejs.org MSI if winget is unavailable. A
   working-but-older Node is upgraded best-effort and never blocks the run.
+- **No Git Bash (Claude Code):** Claude Code on Windows shells out to Git Bash
+  and refuses to start without it. When you configure Claude Code, `ucode`
+  installs Git for Windows via `winget` (`Git.Git`, source pinned) and records
+  `bash.exe` in Claude's managed settings (`CLAUDE_CODE_GIT_BASH_PATH`). If
+  winget is unavailable, it warns and points you at https://git-scm.com/download/win.
 - **Locked-down PowerShell execution policy:** handled by `-ExecutionPolicy
   Bypass` on the one-liner; you do not need admin rights to change machine
   policy.
@@ -217,6 +223,7 @@ ucode doctor --fix
 | `ucode` not recognized in a **new** terminal (worked during install) | The bin dir wasn't persisted to your user PATH. Run once: `[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';' + (Join-Path $env:USERPROFILE '.local\bin'), 'User')`, then open a new terminal. (The current installer does this automatically.) |
 | `ucode` / `databricks` not found | `uv tool update-shell`, open a new window; or run `ucode setup`. |
 | Node too old | `ucode doctor --fix` or `winget install OpenJS.NodeJS`. |
+| Claude Code: "set CLAUDE_CODE_GIT_BASH_PATH to your bash.exe location" | Claude needs Git Bash. `ucode` installs Git for Windows automatically when you configure Claude; if winget is unavailable, install Git from https://git-scm.com/download/win and re-run `ucode claude` (or set `CLAUDE_CODE_GIT_BASH_PATH` to your `bash.exe`). |
 | `npm` permission errors | Reinstall Node via `winget` (per-user) so global installs don't need admin. |
 | GitHub rate-limit message during CLI update | Harmless — `ucode` falls back to the minimum-version check and continues. |
 | Token / login failures | `databricks auth login --host <url> --profile <name>`, then `ucode doctor`. |

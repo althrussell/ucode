@@ -21,6 +21,7 @@ from ucode.config_io import (
 from ucode.databricks import (
     build_auth_helper_string,
     build_tool_base_url,
+    ensure_git_bash,
     get_databricks_token,
 )
 from ucode.process import exec_or_spawn
@@ -224,6 +225,13 @@ def write_tool_config(state: dict, model: str) -> dict:
         disable_web_search=web_search_model is not None,
         profile=state.get("profile"),
     )
+    # Claude Code refuses to start on Windows without Git Bash. Provision it and
+    # pin its location in the managed settings so launch + validation both work
+    # on a clean machine. No-op on macOS/Linux (returns None).
+    git_bash = ensure_git_bash()
+    if git_bash:
+        overlay["env"]["CLAUDE_CODE_GIT_BASH_PATH"] = git_bash
+        managed_keys = managed_keys + [["env", "CLAUDE_CODE_GIT_BASH_PATH"]]
     tracing_env_vars = tracing_env(state, "claude")
     stop_hook_command = claude_tracing_stop_hook_command() if tracing_env_vars else None
     if tracing_env_vars:

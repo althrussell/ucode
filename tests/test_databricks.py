@@ -382,6 +382,48 @@ class TestWingetInstallDatabricksCli:
         assert checked == [True]
 
 
+class TestEnsureGitBash:
+    def test_noop_off_windows(self, monkeypatch):
+        monkeypatch.setattr(db_mod.platform, "system", lambda: "Darwin")
+        assert db_mod.ensure_git_bash() is None
+
+    def test_returns_existing_bash_without_install(self, monkeypatch):
+        monkeypatch.setattr(db_mod.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(db_mod, "refresh_windows_path", lambda: None)
+        monkeypatch.setattr(db_mod, "_find_git_bash", lambda: r"C:\Program Files\Git\bin\bash.exe")
+        calls: list[list[str]] = []
+        monkeypatch.setattr(db_mod, "run", lambda cmd, **k: calls.append(cmd))
+        assert db_mod.ensure_git_bash() == r"C:\Program Files\Git\bin\bash.exe"
+        # Already present: must not shell out to winget.
+        assert calls == []
+
+    def test_installs_git_via_winget_when_missing(self, monkeypatch):
+        monkeypatch.setattr(db_mod.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(db_mod, "refresh_windows_path", lambda: None)
+        monkeypatch.setattr(db_mod.shutil, "which", lambda name: "/x" if name == "winget" else None)
+        found = iter([None, r"C:\Program Files\Git\bin\bash.exe"])
+        monkeypatch.setattr(db_mod, "_find_git_bash", lambda: next(found))
+        calls: list[list[str]] = []
+        monkeypatch.setattr(db_mod, "run", lambda cmd, **k: calls.append(cmd))
+        result = db_mod.ensure_git_bash()
+        assert result == r"C:\Program Files\Git\bin\bash.exe"
+        assert calls and calls[0][0] == "winget"
+        assert "Git.Git" in calls[0]
+        # Pin the winget source to dodge the msstore cert/source-prompt failure.
+        assert "--source" in calls[0] and "winget" in calls[0]
+
+    def test_warns_without_winget(self, monkeypatch):
+        monkeypatch.setattr(db_mod.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(db_mod, "refresh_windows_path", lambda: None)
+        monkeypatch.setattr(db_mod, "_find_git_bash", lambda: None)
+        monkeypatch.setattr(db_mod.shutil, "which", lambda name: None)
+        calls: list[list[str]] = []
+        monkeypatch.setattr(db_mod, "run", lambda cmd, **k: calls.append(cmd))
+        # Best-effort: returns None and never raises when it can't provision.
+        assert db_mod.ensure_git_bash() is None
+        assert calls == []
+
+
 class TestFormatSubprocessResult:
     def test_suppresses_stdout_on_success(self):
         result = subprocess.CompletedProcess(

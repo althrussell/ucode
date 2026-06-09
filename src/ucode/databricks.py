@@ -47,6 +47,10 @@ DATABRICKS_CLI_RELEASES_API = "https://api.github.com/repos/databricks/setup-cli
 # modern Node; 18 is the floor that keeps every supported agent CLI working.
 MIN_NODE_MAJOR = 18
 NODE_DOWNLOAD_URL = "https://nodejs.org/en/download"
+# Claude Code shells out to Git Bash on Windows and refuses to start without it.
+# Git for Windows ships `bash.exe`; provision it so `ucode claude` works on a
+# clean machine.
+GIT_FOR_WINDOWS_DOWNLOAD_URL = "https://git-scm.com/download/win"
 
 
 def _debug_enabled() -> bool:
@@ -793,6 +797,98 @@ def ensure_node_npm() -> None:
     refresh_windows_path()
     if not shutil.which("npm"):
         _raise_node_remediation(system)
+
+
+def _find_git_bash() -> str | None:
+    """Locate a Git-for-Windows ``bash.exe``, or None. Windows only.
+
+    Claude Code specifically needs Git Bash (not WSL's ``System32\\bash.exe``),
+    so we look in Git for Windows' standard install locations and derive the
+    path from ``git`` on PATH (``<root>\\cmd\\git.exe`` → ``<root>\\bin\\bash.exe``).
+    An existing ``CLAUDE_CODE_GIT_BASH_PATH`` is honored when it points at a real
+    file.
+    """
+    if platform.system() != "Windows":
+        return None
+    override = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH", "").strip()
+    if override:
+        try:
+            if Path(override).is_file():
+                return override
+        except OSError:
+            pass
+
+    candidates: list[Path] = []
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    candidates.append(Path(program_files) / "Git" / "bin" / "bash.exe")
+    candidates.append(Path(program_files_x86) / "Git" / "bin" / "bash.exe")
+    if local_appdata:
+        candidates.append(Path(local_appdata) / "Programs" / "Git" / "bin" / "bash.exe")
+
+    # Derive from `git` on PATH: git.exe usually lives in <root>\cmd or <root>\bin.
+    git = shutil.which("git")
+    if git:
+        root = Path(git).parent.parent
+        candidates.append(root / "bin" / "bash.exe")
+
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    return None
+
+
+def ensure_git_bash() -> str | None:
+    """Ensure Git-for-Windows ``bash.exe`` is available for Claude Code.
+
+    Returns the resolved ``bash.exe`` path, or None on non-Windows platforms or
+    when it cannot be provisioned. Best-effort: installs Git for Windows via
+    winget when missing, then warns (without raising) if it still cannot be
+    found so the rest of setup can complete.
+    """
+    if platform.system() != "Windows":
+        return None
+    refresh_windows_path()
+    found = _find_git_bash()
+    if found:
+        return found
+
+    if shutil.which("winget"):
+        print_warning("Claude Code needs Git Bash on Windows. Installing Git for Windows...")
+        try:
+            run(
+                [
+                    "winget",
+                    "install",
+                    "--silent",
+                    "--accept-source-agreements",
+                    "--accept-package-agreements",
+                    "-e",
+                    "--id",
+                    "Git.Git",
+                    "--source",
+                    "winget",
+                ],
+                timeout=900,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            print_warning(
+                f"Could not install Git for Windows automatically ({type(exc).__name__})."
+            )
+        refresh_windows_path()
+        found = _find_git_bash()
+
+    if not found:
+        print_warning(
+            "Claude Code requires Git Bash on Windows. Install Git for Windows from "
+            f"{GIT_FOR_WINDOWS_DOWNLOAD_URL}, then re-run `ucode claude`, or set "
+            "CLAUDE_CODE_GIT_BASH_PATH to your bash.exe location."
+        )
+    return found
 
 
 def _profile_args(profile: str | None) -> list[str]:
