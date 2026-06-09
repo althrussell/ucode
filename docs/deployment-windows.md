@@ -16,7 +16,7 @@ dependency chain, none of which you install manually:
 |------------|-----|----------------------|
 | `uv` | Installs/runs `ucode` and manages Python | Astral installer, or `uv self update` if present |
 | Python 3.12 | `ucode` runtime | `uv python install 3.12` (never relies on system Python) |
-| Databricks CLI (latest) | Auth + token refresh | GitHub release compare, upgraded if behind |
+| Databricks CLI (latest) | Auth + token refresh | `winget install Databricks.DatabricksCLI --source winget`, upgraded if behind a GitHub release compare |
 | Node.js / npm | Installs the npm-distributed agent CLIs | `winget install OpenJS.NodeJS` (or nodejs.org MSI) |
 | Agent CLIs | The agents you launch | `npm install -g` per agent |
 | MLflow CLI (optional) | Only for Claude Code tracing | `uv tool install "ucode[tracing]"` path |
@@ -24,6 +24,11 @@ dependency chain, none of which you install manually:
 `jq`, `sh`, and a bash shell are **not** required — the credential helper is now
 the native `ucode auth-token` command, which fixed the previous Windows token
 refresh failures.
+
+`winget` (the "App Installer", bundled with Windows 10/11) is used to provision
+the Databricks CLI and Node.js. If it is missing — common on Windows Server
+images — install **App Installer** from the Microsoft Store first, or install
+those two dependencies manually; `ucode setup` will tell you exactly what to do.
 
 ---
 
@@ -48,8 +53,10 @@ The installer is idempotent and self-healing:
 
 - **Old/system Python:** ignored — `uv` provisions its own Python 3.12.
 - **Outdated Databricks CLI:** `ucode setup` compares against the latest GitHub
-  release and upgrades in place via the official PowerShell installer. Offline?
-  It falls back to enforcing the minimum supported version.
+  release and upgrades in place via `winget` (`Databricks.DatabricksCLI`, source
+  pinned to `winget` so the Microsoft Store source can't trigger a certificate
+  failure). Offline, or winget unavailable? It falls back to enforcing the
+  minimum supported version and points you at the manual installer.
 - **Missing or old Node.js:** installed/upgraded via `winget`
   (`OpenJS.NodeJS`), or from the nodejs.org MSI if winget is unavailable. A
   working-but-older Node is upgraded best-effort and never blocks the run.

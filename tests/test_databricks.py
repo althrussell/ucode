@@ -307,6 +307,80 @@ class TestEnsureNodeNpm:
         with pytest.raises(RuntimeError, match="Node.js/npm is required"):
             ensure_node_npm()
 
+    def test_windows_winget_pins_source(self, monkeypatch):
+        monkeypatch.setattr(db_mod.platform, "system", lambda: "Windows")
+        present = {"npm": False, "node": False, "winget": True}
+        monkeypatch.setattr(
+            db_mod.shutil,
+            "which",
+            lambda name: "/x" if present.get(name) else None,
+        )
+        monkeypatch.setattr(db_mod, "_node_major_version", lambda: None)
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **k):
+            calls.append(cmd)
+            present["npm"] = True
+            present["node"] = True
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+        ensure_node_npm()
+        assert calls and calls[0][0] == "winget"
+        # Must pin the winget source so the msstore source's cert failure /
+        # source-disambiguation prompt can never abort an unattended install.
+        assert "--source" in calls[0] and "winget" in calls[0]
+        assert "OpenJS.NodeJS" in calls[0]
+
+
+class TestWingetInstallDatabricksCli:
+    def test_uses_winget_with_pinned_source(self, monkeypatch):
+        monkeypatch.setattr(db_mod.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(db_mod.shutil, "which", lambda name: "/x" if name == "winget" else None)
+        calls: list[list[str]] = []
+        monkeypatch.setattr(db_mod, "run", lambda cmd, **k: calls.append(cmd))
+        db_mod._run_databricks_cli_installer(brew_subcommand="install")
+        assert calls == [
+            [
+                "winget",
+                "install",
+                "-e",
+                "--id",
+                "Databricks.DatabricksCLI",
+                "--source",
+                "winget",
+                "--silent",
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+            ]
+        ]
+
+    def test_upgrade_uses_winget_upgrade(self, monkeypatch):
+        monkeypatch.setattr(db_mod.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(db_mod.shutil, "which", lambda name: "/x" if name == "winget" else None)
+        calls: list[list[str]] = []
+        monkeypatch.setattr(db_mod, "run", lambda cmd, **k: calls.append(cmd))
+        db_mod._run_databricks_cli_installer(brew_subcommand="upgrade")
+        assert calls[0][:2] == ["winget", "upgrade"]
+
+    def test_raises_remediation_when_winget_missing(self, monkeypatch):
+        monkeypatch.setattr(db_mod.shutil, "which", lambda name: None)
+        with pytest.raises(RuntimeError, match="winget is required"):
+            db_mod._winget_install_databricks_cli(upgrade=False)
+
+    def test_latest_tolerates_upgrade_failure_when_installed(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "latest_databricks_cli_version", lambda: (0, 305, 1))
+        monkeypatch.setattr(db_mod, "_installed_databricks_cli_version", lambda: (0, 300, 0))
+
+        def boom(brew_subcommand="install"):
+            raise RuntimeError("winget had no applicable upgrade")
+
+        monkeypatch.setattr(db_mod, "_run_databricks_cli_installer", boom)
+        checked: list[bool] = []
+        monkeypatch.setattr(db_mod, "ensure_databricks_cli_version", lambda: checked.append(True))
+        # Must NOT raise — a failed upgrade with a working CLI degrades to a warning.
+        db_mod.ensure_databricks_cli_latest()
+        assert checked == [True]
+
 
 class TestFormatSubprocessResult:
     def test_suppresses_stdout_on_success(self):

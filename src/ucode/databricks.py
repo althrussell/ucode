@@ -36,9 +36,6 @@ from ucode.ui import (
 UNIX_DATABRICKS_INSTALL_URL = (
     "https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh"
 )
-WINDOWS_DATABRICKS_INSTALL_URL = (
-    "https://raw.githubusercontent.com/databricks/setup-cli/main/install.ps1"
-)
 AI_GATEWAY_V2_DOCS_URL = "https://docs.databricks.com/aws/en/ai-gateway/overview-beta"
 MIN_DATABRICKS_CLI_VERSION = (0, 298, 0)
 TOKEN_REFRESH_INTERVAL_SECONDS = 1800
@@ -511,10 +508,7 @@ def _run_databricks_cli_installer(brew_subcommand: str = "install") -> None:
     system = platform.system()
     try:
         if system == "Windows":
-            run(
-                ["powershell", "-Command", f"irm {WINDOWS_DATABRICKS_INSTALL_URL} | iex"],
-                timeout=240,
-            )
+            _winget_install_databricks_cli(upgrade=brew_subcommand == "upgrade")
         elif system == "Darwin" and shutil.which("brew"):
             run(["brew", brew_subcommand, "databricks"], timeout=240)
         elif shutil.which("curl"):
@@ -525,6 +519,38 @@ def _run_databricks_cli_installer(brew_subcommand: str = "install") -> None:
             raise RuntimeError("Neither curl nor wget is available.")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as exc:
         raise RuntimeError("Failed to install/upgrade Databricks CLI automatically.") from exc
+
+
+def _winget_install_databricks_cli(*, upgrade: bool) -> None:
+    """Install/upgrade the Databricks CLI on Windows via winget.
+
+    The Databricks setup-cli repo has no PowerShell install script (the old
+    ``install.ps1`` URL 404s); winget is the official Windows path. We pin
+    ``--source winget`` because the ``msstore`` source can fail certificate
+    validation on locked-down/server images and otherwise makes winget prompt
+    to disambiguate the source.
+    """
+    if not shutil.which("winget"):
+        raise RuntimeError(
+            "winget is required to install the Databricks CLI on Windows but was not found.\n"
+            "Install 'App Installer' from the Microsoft Store (provides winget), then re-run, "
+            "or install the CLI manually: https://docs.databricks.com/dev-tools/cli/install.html"
+        )
+    run(
+        [
+            "winget",
+            "upgrade" if upgrade else "install",
+            "-e",
+            "--id",
+            "Databricks.DatabricksCLI",
+            "--source",
+            "winget",
+            "--silent",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+        ],
+        timeout=600,
+    )
 
 
 def ensure_databricks_cli_version() -> None:
@@ -627,7 +653,16 @@ def ensure_databricks_cli_latest() -> None:
     current = ".".join(str(n) for n in installed) if installed else "unknown"
     target = ".".join(str(n) for n in latest)
     print_warning(f"Databricks CLI v{current} is behind latest v{target}. Upgrading...")
-    _run_databricks_cli_installer(brew_subcommand="upgrade")
+    try:
+        _run_databricks_cli_installer(brew_subcommand="upgrade")
+    except RuntimeError as exc:
+        # A failed *upgrade* on a machine that already has a working CLI must not
+        # abort provisioning (e.g. winget reporting no applicable upgrade). Only
+        # the minimum-version guarantee is mandatory.
+        if installed is not None:
+            print_warning(f"Could not upgrade the Databricks CLI ({exc}); keeping v{current}.")
+        else:
+            raise
     # Guarantee the result still satisfies the minimum even if the upgrade was a
     # no-op for some reason.
     ensure_databricks_cli_version()
@@ -707,6 +742,9 @@ def ensure_node_npm() -> None:
         if system == "Darwin" and shutil.which("brew"):
             run(["brew", "upgrade" if already_present else "install", "node"], timeout=900)
         elif system == "Windows" and shutil.which("winget"):
+            # Pin --source winget: the msstore source can fail certificate
+            # validation on locked-down images and otherwise makes winget prompt
+            # to disambiguate the source (which aborts a non-interactive run).
             run(
                 [
                     "winget",
@@ -717,6 +755,8 @@ def ensure_node_npm() -> None:
                     "-e",
                     "--id",
                     "OpenJS.NodeJS",
+                    "--source",
+                    "winget",
                 ],
                 timeout=900,
             )
