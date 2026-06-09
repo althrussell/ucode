@@ -10,9 +10,9 @@ import logging.handlers
 import os
 import platform
 import re
-import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Literal, cast, overload
 from urllib import error as urllib_error
@@ -42,6 +42,13 @@ WINDOWS_DATABRICKS_INSTALL_URL = (
 AI_GATEWAY_V2_DOCS_URL = "https://docs.databricks.com/aws/en/ai-gateway/overview-beta"
 MIN_DATABRICKS_CLI_VERSION = (0, 298, 0)
 TOKEN_REFRESH_INTERVAL_SECONDS = 1800
+# GitHub releases API for the Databricks setup-cli, used to detect whether the
+# installed CLI is behind the newest published release.
+DATABRICKS_CLI_RELEASES_API = "https://api.github.com/repos/databricks/setup-cli/releases/latest"
+# Node.js is required to install the npm-distributed agent CLIs. Agents target
+# modern Node; 18 is the floor that keeps every supported agent CLI working.
+MIN_NODE_MAJOR = 18
+NODE_DOWNLOAD_URL = "https://nodejs.org/en/download"
 
 
 def _debug_enabled() -> bool:
@@ -230,6 +237,32 @@ def _http_get_json(
         if body_excerpt:
             reason = f"{reason}: {body_excerpt}"
         return None, reason
+    except urllib_error.URLError as exc:
+        _debug(f"GET {url}", f"URLError: {exc.reason}")
+        return None, f"network error: {exc.reason}"
+
+
+def _github_get_json(url: str, *, timeout: int = 5) -> tuple[dict | list | None, str | None]:
+    """GET a public GitHub JSON endpoint without authentication.
+
+    GitHub rejects requests lacking a ``User-Agent`` header, and its
+    unauthenticated rate limit (60/hr) returns 403; both are treated as a
+    soft failure (``(None, reason)``) so callers can fall back. Never raises.
+    """
+    request = urllib_request.Request(
+        url,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "ucode"},
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+        try:
+            return json.loads(body), None
+        except json.JSONDecodeError as exc:
+            return None, f"response was not valid JSON ({exc.msg})"
+    except urllib_error.HTTPError as exc:
+        _debug(f"GET {url}", f"HTTP {exc.code} {exc.reason}")
+        return None, f"HTTP {exc.code} {exc.reason}"
     except urllib_error.URLError as exc:
         _debug(f"GET {url}", f"URLError: {exc.reason}")
         return None, f"network error: {exc.reason}"
@@ -536,7 +569,176 @@ def install_databricks_cli() -> None:
         raise RuntimeError(
             "Databricks CLI install completed, but `databricks` is still not on PATH."
         )
+    # A fresh install should land on the newest release, not merely the minimum.
+    ensure_databricks_cli_latest()
+
+
+def _installed_databricks_cli_version() -> tuple[int, int, int] | None:
+    """Return the installed Databricks CLI version tuple, or None if unreadable."""
+    try:
+        result = run(
+            ["databricks", "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    raw = result.stdout or result.stderr or ""
+    output = (raw if isinstance(raw, str) else raw.decode(errors="replace")).strip()
+    return _parse_databricks_cli_version(output)
+
+
+def latest_databricks_cli_version() -> tuple[int, int, int] | None:
+    """Return the newest published Databricks CLI version, or None if unknown.
+
+    Queries the GitHub releases API with a short timeout. Any failure — network
+    error, GitHub's unauthenticated 60/hr rate limit (403/429), malformed JSON —
+    returns None so callers can degrade gracefully to the minimum-version check.
+    Never raises.
+    """
+    payload, reason = _github_get_json(DATABRICKS_CLI_RELEASES_API, timeout=5)
+    if not isinstance(payload, dict):
+        _debug("latest_databricks_cli_version", reason or "no payload")
+        return None
+    tag = payload.get("tag_name") or payload.get("name") or ""
+    version = _parse_databricks_cli_version(str(tag))
+    if version is None:
+        _debug("latest_databricks_cli_version", f"unparseable tag: {tag!r}")
+    return version
+
+
+def ensure_databricks_cli_latest() -> None:
+    """Upgrade the Databricks CLI to the newest release when behind.
+
+    Falls back to :func:`ensure_databricks_cli_version` (minimum-version check)
+    whenever the latest release cannot be determined — offline machines, GitHub
+    rate limits, etc. — so provisioning is never blocked by a network hiccup.
+    """
+    latest = latest_databricks_cli_version()
+    if latest is None:
+        # Offline / rate-limited: enforce at least the minimum and move on.
+        ensure_databricks_cli_version()
+        return
+    installed = _installed_databricks_cli_version()
+    if installed is not None and installed >= latest:
+        return
+    current = ".".join(str(n) for n in installed) if installed else "unknown"
+    target = ".".join(str(n) for n in latest)
+    print_warning(f"Databricks CLI v{current} is behind latest v{target}. Upgrading...")
+    _run_databricks_cli_installer(brew_subcommand="upgrade")
+    # Guarantee the result still satisfies the minimum even if the upgrade was a
+    # no-op for some reason.
     ensure_databricks_cli_version()
+
+
+def _node_major_version() -> int | None:
+    """Return the installed Node.js major version, or None when node is absent."""
+    if not shutil.which("node"):
+        return None
+    try:
+        result = run(
+            ["node", "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r"v?(\d+)\.", result.stdout or result.stderr or "")
+    return int(match.group(1)) if match else None
+
+
+def _run_with_privilege(cmd: list[str], *, timeout: int) -> None:
+    """Run ``cmd`` as root, escalating with sudo only when necessary.
+
+    Used for apt/dnf on Linux. brew (no root) and winget (per-user) never reach
+    here. Raises a RuntimeError with a copy-pasteable command when neither root
+    nor sudo is available.
+    """
+    is_root = getattr(os, "geteuid", lambda: 1)() == 0
+    if is_root:
+        run(cmd, timeout=timeout)
+        return
+    if shutil.which("sudo"):
+        run(["sudo", *cmd], timeout=timeout)
+        return
+    raise RuntimeError(
+        "Root privileges are required to install Node.js. Re-run as root or run:\n"
+        f"    sudo {' '.join(cmd)}"
+    )
+
+
+def _raise_node_remediation(system: str, cause: Exception | None = None) -> None:
+    if system == "Windows":
+        hint = f"Install Node.js from {NODE_DOWNLOAD_URL} or run `winget install OpenJS.NodeJS`."
+    elif system == "Darwin":
+        hint = f"Install Node.js with `brew install node` or from {NODE_DOWNLOAD_URL}."
+    else:
+        hint = (
+            "Install Node.js + npm via your package manager "
+            f"(e.g. `sudo apt-get install -y nodejs npm`) or from {NODE_DOWNLOAD_URL}."
+        )
+    message = f"Node.js/npm is required to install the agent CLIs. {hint}"
+    if cause is not None:
+        raise RuntimeError(message) from cause
+    raise RuntimeError(message)
+
+
+def ensure_node_npm() -> None:
+    """Ensure ``node`` + ``npm`` are present and Node is recent enough.
+
+    Installs or upgrades with no prompts using whatever manager is available
+    (brew on macOS, winget on Windows, apt/dnf on Linux). Best-effort: if an
+    upgrade fails but a working ``npm`` already exists, it warns and continues;
+    it only raises (with platform-specific remediation) when no usable npm can
+    be produced.
+    """
+    have_npm = bool(shutil.which("npm"))
+    node_major = _node_major_version()
+    if have_npm and node_major is not None and node_major >= MIN_NODE_MAJOR:
+        return
+
+    system = platform.system()
+    already_present = have_npm or node_major is not None
+    try:
+        if system == "Darwin" and shutil.which("brew"):
+            run(["brew", "upgrade" if already_present else "install", "node"], timeout=900)
+        elif system == "Windows" and shutil.which("winget"):
+            run(
+                [
+                    "winget",
+                    "install",
+                    "--silent",
+                    "--accept-source-agreements",
+                    "--accept-package-agreements",
+                    "-e",
+                    "--id",
+                    "OpenJS.NodeJS",
+                ],
+                timeout=900,
+            )
+        elif shutil.which("apt-get"):
+            _run_with_privilege(["apt-get", "install", "-y", "nodejs", "npm"], timeout=900)
+        elif shutil.which("dnf"):
+            _run_with_privilege(["dnf", "install", "-y", "nodejs"], timeout=900)
+        else:
+            _raise_node_remediation(system)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        # An upgrade attempt that failed on a machine that already has a usable
+        # npm should not abort provisioning.
+        if shutil.which("npm"):
+            print_warning(
+                f"Could not upgrade Node.js ({type(exc).__name__}); "
+                "continuing with the installed version."
+            )
+            return
+        _raise_node_remediation(system, exc)
+
+    if not shutil.which("npm"):
+        _raise_node_remediation(system)
 
 
 def _profile_args(profile: str | None) -> list[str]:
@@ -591,8 +793,14 @@ def has_valid_databricks_auth(workspace: str, profile: str | None = None) -> boo
         return False
 
 
-def get_databricks_profiles() -> list[tuple[str, str]]:
-    """Return [(host_url, profile_name), ...] from Databricks CLI profiles.
+def list_all_databricks_profiles() -> list[tuple[str, str, str]]:
+    """Return [(host_url, profile_name, auth_type), ...] for *every* profile.
+
+    No host dedup and no PAT filtering — callers decide what to drop. This is
+    the source of truth for duplicate-host handling: a workspace that has both a
+    ``DEFAULT`` and a named profile pointing at the same host yields both
+    entries here, so the picker can list each one and host->profile resolution
+    can disambiguate ``databricks auth token --host``.
 
     Returns ``[]`` on any failure (CLI missing, timeout, non-zero exit, JSON
     decode error). When ``UCODE_DEBUG=1`` each dropout path logs *why* the
@@ -608,43 +816,80 @@ def get_databricks_profiles() -> list[tuple[str, str]]:
             timeout=20,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        _debug("get_databricks_profiles", f"subprocess error: {type(exc).__name__}: {exc}")
+        _debug("list_all_databricks_profiles", f"subprocess error: {type(exc).__name__}: {exc}")
         return []
     if result.returncode != 0:
-        _debug("get_databricks_profiles", _format_subprocess_result(result))
+        _debug("list_all_databricks_profiles", _format_subprocess_result(result))
         return []
     try:
         profiles = json.loads(result.stdout or "{}").get("profiles") or []
     except json.JSONDecodeError as exc:
-        _debug("get_databricks_profiles", f"json decode error: {exc.msg}")
+        _debug("list_all_databricks_profiles", f"json decode error: {exc.msg}")
         return []
 
-    # dict dedupes by host (first non-PAT profile wins).
-    out: dict[str, str] = {}
-    pat = 0
+    out: list[tuple[str, str, str]] = []
     for p in profiles:
         host = (p.get("host") or "").rstrip("/")
         name = p.get("name")
         if not host or not name:
             continue
-        if p.get("auth_type") == "pat":
-            pat += 1
+        out.append((host, name, p.get("auth_type") or ""))
+
+    _debug("list_all_databricks_profiles", f"returned={len(out)} total={len(profiles)}")
+    return out
+
+
+def get_databricks_profiles() -> list[tuple[str, str]]:
+    """Return a deduped [(host_url, profile_name), ...] view of CLI profiles.
+
+    Dedupes by host (first non-PAT profile wins) for callers that just want one
+    entry per workspace. Use :func:`list_all_databricks_profiles` when duplicate
+    hosts must be preserved (the workspace picker does).
+    """
+    out: dict[str, str] = {}
+    for host, name, auth_type in list_all_databricks_profiles():
+        if auth_type == "pat":
             continue
         out.setdefault(host, name)
-
-    _debug(
-        "get_databricks_profiles",
-        f"returned={len(out)} total={len(profiles)} pat={pat}",
-    )
     return list(out.items())
 
 
 def find_profile_name_for_host(workspace: str) -> str | None:
-    """Find the Databricks CLI profile name matching a workspace URL."""
+    """Return a Databricks CLI profile name for a workspace host, deterministically.
+
+    When a host has multiple profiles (e.g. ``DEFAULT`` plus a named profile),
+    prefer an exact ``DEFAULT`` match, then the first non-PAT profile, then the
+    first PAT profile. Only returns ``None`` when the host has no profile at all.
+    Guaranteeing a name whenever any profile matches is what lets us always pass
+    ``--profile`` and avoid the ``databricks auth token --host`` ambiguity error
+    that previously crashed duplicate-host setups.
+    """
     normalized = workspace.rstrip("/")
-    for host, name in get_databricks_profiles():
-        if host == normalized:
+    matches = [
+        (name, auth_type)
+        for host, name, auth_type in list_all_databricks_profiles()
+        if host == normalized
+    ]
+    if not matches:
+        return None
+    for name, _auth_type in matches:
+        if name == "DEFAULT":
             return name
+    for name, auth_type in matches:
+        if auth_type != "pat":
+            return name
+    return matches[0][0]
+
+
+def find_host_for_profile(profile: str) -> str | None:
+    """Return the workspace host URL for a named Databricks CLI profile, or None.
+
+    Inverse of :func:`find_profile_name_for_host`; lets ``--profile`` resolve the
+    workspace it targets without the user re-typing the URL.
+    """
+    for host, name, _auth_type in list_all_databricks_profiles():
+        if name == profile:
+            return host
     return None
 
 
@@ -696,7 +941,7 @@ def get_databricks_token(
     # bearer directly. Used by the e2e job, where the protected runner has
     # no `databricks auth login` cache and `databricks auth token` only knows
     # how to read user-OAuth caches (not M2M client_credentials). Mirrors the
-    # same short-circuit baked into ``build_auth_shell_command``.
+    # same short-circuit honored by the ``ucode auth-token`` credential helper.
     bearer = os.environ.get("DATABRICKS_BEARER", "").strip()
     if bearer:
         _debug("get_databricks_token", "using DATABRICKS_BEARER env var")
@@ -955,26 +1200,86 @@ def list_databricks_apps(workspace: str, profile: str | None = None) -> list[dic
         raise RuntimeError("Databricks apps listing returned invalid JSON.") from exc
 
 
-def build_auth_shell_command(workspace: str, profile: str | None = None) -> str:
-    workspace_arg = shlex.quote(workspace.rstrip("/"))
+@functools.cache
+def resolve_ucode_invocation() -> list[str]:
+    """Return an absolute argv prefix that invokes ``ucode``.
+
+    Agent launchers (a Claude/Codex credential helper, a GUI-spawned shell) can
+    run with a thinned PATH that lacks the uv tool bin dir, so the credential
+    helper command we bake into agent configs must not depend on ``ucode`` being
+    on PATH. Resolution order:
+
+    1. ``ucode`` already on PATH (``shutil.which``);
+    2. ``<uv tool dir --bin>/ucode[.exe]`` (mirrors ``_uv_tool_mlflow_path``);
+    3. ``[sys.executable, "-m", "ucode"]`` as a last resort.
+
+    Cached because the absolute path is stable for the process lifetime and this
+    is called on every state hydration.
+    """
+    found = shutil.which("ucode")
+    if found:
+        return [found]
+    uv_bin = _uv_tool_bin_path("ucode")
+    if uv_bin:
+        return [uv_bin]
+    return [sys.executable, "-m", "ucode"]
+
+
+def _uv_tool_bin_path(name: str) -> str | None:
+    """Absolute path to a binary inside uv's tool bin dir, or None."""
+    if not shutil.which("uv"):
+        return None
+    try:
+        result = run(
+            ["uv", "tool", "dir", "--bin"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    bin_dir = (result.stdout or "").strip()
+    if result.returncode != 0 or not bin_dir:
+        return None
+    exe = f"{name}.exe" if platform.system() == "Windows" else name
+    candidate = Path(bin_dir) / exe
+    return str(candidate) if candidate.exists() else None
+
+
+def build_auth_helper_argv(workspace: str, profile: str | None = None) -> list[str]:
+    """argv for the cross-platform credential helper (no shell required).
+
+    Codex runs ``auth.command``/``auth.args`` directly (no shell), so spaces in
+    paths are handled natively. This is the canonical form; the string variant
+    is derived from it.
+    """
+    argv = [*resolve_ucode_invocation(), "auth-token", "--host", workspace.rstrip("/")]
     if profile:
-        profile_arg = shlex.quote(profile)
-        cli_command = (
-            f"databricks auth token --host {workspace_arg} "
-            f"--profile {profile_arg} --force-refresh --output json "
-            "| jq -r '.access_token'"
-        )
-    else:
-        cli_command = (
-            "env -u DATABRICKS_CONFIG_PROFILE "
-            f"databricks auth token --host {workspace_arg} --force-refresh --output json "
-            "| jq -r '.access_token'"
-        )
-    return (
-        'if [ -n "${DATABRICKS_BEARER:-}" ]; then '
-        'printf "%s\\n" "$DATABRICKS_BEARER"; '
-        f"else {cli_command}; fi"
-    )
+        argv += ["--profile", profile]
+    return argv
+
+
+def _dquote(token: str) -> str:
+    """Wrap a token in double quotes for both cmd.exe and POSIX shells.
+
+    Claude's ``apiKeyHelper`` is a single command string run through a shell, so
+    paths/profiles containing spaces (e.g. ``C:\\Users\\First Last\\...``) must be
+    quoted. Double quotes are honored by both cmd.exe and POSIX shells; embedded
+    double quotes (vanishingly rare in exe paths/profile names) are backslash
+    escaped.
+    """
+    return '"' + token.replace('"', '\\"') + '"'
+
+
+def build_auth_helper_string(workspace: str, profile: str | None = None) -> str:
+    """Plain command string for Claude's ``apiKeyHelper`` (shell-invoked).
+
+    Every token is double-quoted so the command parses identically under
+    cmd.exe and POSIX shells regardless of spaces in the resolved ``ucode``
+    path or the profile name.
+    """
+    return " ".join(_dquote(part) for part in build_auth_helper_argv(workspace, profile))
 
 
 def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], str | None]:

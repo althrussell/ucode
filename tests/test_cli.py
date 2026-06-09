@@ -278,7 +278,7 @@ class TestAutoConfigureOnFirstRun:
             result = runner.invoke(app, ["claude"])
         assert result.exit_code == 0, result.output
         mock_bootstrap.assert_called_once_with("claude", update_existing=True)
-        mock_auto.assert_called_once_with("claude")
+        mock_auto.assert_called_once_with("claude", profile=None, workspace=None)
 
     def test_triggers_when_tool_not_in_available_tools(self):
         """Auto-configure runs when workspace exists but the tool wasn't configured."""
@@ -302,7 +302,7 @@ class TestAutoConfigureOnFirstRun:
             result = runner.invoke(app, ["claude"])
         assert result.exit_code == 0, result.output
         mock_bootstrap.assert_called_once_with("claude", update_existing=True)
-        mock_auto.assert_called_once_with("claude")
+        mock_auto.assert_called_once_with("claude", profile=None, workspace=None)
 
     def test_skipped_when_already_configured(self):
         """Auto-configure is skipped when workspace and tool are already set up."""
@@ -528,7 +528,7 @@ class TestConfigureAgentFlag:
         cmd = mock_run.call_args[0][0]
         assert cmd[:3] == ["uv", "tool", "install"]
         assert "--reinstall" in cmd
-        assert any("github.com/databricks/ucode" in s for s in cmd)
+        assert any("github.com/althrussell/ucode" in s for s in cmd)
 
     def test_upgrade_handles_uv_missing(self):
         with patch("subprocess.run", side_effect=FileNotFoundError):

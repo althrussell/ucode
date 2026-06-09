@@ -162,7 +162,10 @@ class TestHydrateState:
         assert result["base_urls"] == {}
         assert result["agents"] == {}
 
-    def test_populates_agent_state_when_workspace_present(self):
+    def test_populates_agent_state_when_workspace_present(self, monkeypatch):
+        import ucode.databricks as db_mod
+
+        monkeypatch.setattr(db_mod, "resolve_ucode_invocation", lambda: ["/abs/ucode"])
         result = hydrate_state(
             {
                 "workspace": FAKE_WS,
@@ -173,13 +176,18 @@ class TestHydrateState:
 
         assert result["agents"]["claude"]["model"] == "claude-opus"
         assert result["agents"]["claude"]["base_url"] == FAKE_URLS["claude"]
-        assert result["agents"]["claude"]["auth_command"].startswith("if [ -n")
+        # Cross-platform credential helper, not the old bash one-liner.
+        auth_command = result["agents"]["claude"]["auth_command"]
+        assert "auth-token" in auth_command
+        assert "--host" in auth_command
+        assert not auth_command.startswith("if [ -n")
+        assert "jq" not in auth_command and "sh -c" not in auth_command
         assert result["agents"]["codex"]["model"] == "gpt-5"
         assert result["agents"]["codex"]["base_url"] == FAKE_URLS["codex"]
-        assert (
-            result["agents"]["codex"]["auth"]["args"][1]
-            == result["agents"]["codex"]["auth_command"]
-        )
+        # Codex runs the helper argv directly (no shell).
+        codex_auth = result["agents"]["codex"]["auth"]
+        assert codex_auth["command"] == "/abs/ucode"
+        assert codex_auth["args"][:2] == ["auth-token", "--host"]
         assert result["agents"]["pi"]["model"] == "claude-opus"
         assert result["agents"]["pi"]["base_urls"] == FAKE_URLS["pi"]
 

@@ -45,11 +45,15 @@ class TestRenderOverlay:
         provider = overlay["model_providers"]["ucode-databricks"]
         assert provider["wire_api"] == "responses"
 
-    def test_auth_uses_sh(self):
+    def test_auth_runs_ucode_helper(self, monkeypatch):
+        import ucode.databricks as db_mod
+
+        monkeypatch.setattr(db_mod, "resolve_ucode_invocation", lambda: ["/abs/ucode"])
         overlay = codex.render_overlay(WS)
         auth = overlay["model_providers"]["ucode-databricks"]["auth"]
-        assert auth["command"] == "sh"
-        assert "-c" in auth["args"]
+        assert auth["command"] == "/abs/ucode"
+        assert auth["args"][:2] == ["auth-token", "--host"]
+        assert auth["command"] != "sh"
 
     def test_auth_contains_workspace(self):
         overlay = codex.render_overlay(WS)
@@ -277,17 +281,17 @@ class TestCodexValidateCmd:
 
 class TestCodexLaunch:
     def test_sets_oauth_token_and_ucode_profile_before_exec(self, monkeypatch):
-        exec_calls: list[tuple[str, list[str]]] = []
+        exec_calls: list[tuple[list[str], dict | None]] = []
 
-        def fake_execvp(binary: str, args: list[str]) -> None:
-            exec_calls.append((binary, args))
+        def fake_exec_or_spawn(argv: list[str], env: dict | None = None) -> None:
+            exec_calls.append((argv, env))
             raise RuntimeError("stop")
 
         monkeypatch.delenv("OAUTH_TOKEN", raising=False)
         monkeypatch.setattr(
             codex, "get_databricks_token", lambda workspace, profile=None: "fresh-token"
         )
-        monkeypatch.setattr(os, "execvp", fake_execvp)
+        monkeypatch.setattr(codex, "exec_or_spawn", fake_exec_or_spawn)
 
         try:
             codex.launch({"workspace": WS}, ["--search"])
@@ -295,4 +299,7 @@ class TestCodexLaunch:
             assert str(exc) == "stop"
 
         assert os.environ["OAUTH_TOKEN"] == "fresh-token"
-        assert exec_calls == [("codex", ["codex", "--profile", "ucode", "--search"])]
+        assert len(exec_calls) == 1
+        argv, env = exec_calls[0]
+        assert argv == ["codex", "--profile", "ucode", "--search"]
+        assert env is not None and env["OAUTH_TOKEN"] == "fresh-token"

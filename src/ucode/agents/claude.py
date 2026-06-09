@@ -19,10 +19,11 @@ from ucode.config_io import (
     write_json_file,
 )
 from ucode.databricks import (
-    build_auth_shell_command,
+    build_auth_helper_string,
     build_tool_base_url,
     get_databricks_token,
 )
+from ucode.process import exec_or_spawn
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 from ucode.tracing import tracing_env
@@ -143,7 +144,7 @@ def render_overlay(
             env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = _maybe_add_1m_suffix(claude_models["sonnet"])
         if claude_models.get("haiku"):
             env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = claude_models["haiku"]
-    overlay: dict = {"apiKeyHelper": build_auth_shell_command(workspace, profile), "env": env}
+    overlay: dict = {"apiKeyHelper": build_auth_helper_string(workspace, profile), "env": env}
     keys: list[list[str]] = [["apiKeyHelper"]] + [["env", k] for k in env]
 
     # Disable Claude Code's built-in WebSearch (it routes through Anthropic's
@@ -427,8 +428,13 @@ def launch(state: dict, tool_args: list[str]) -> None:
     binary = SPEC["binary"]
     workspace = state.get("workspace")
     if workspace:
+        # OAUTH_TOKEN is still needed for MCP `${OAUTH_TOKEN}` headers; the
+        # apiKeyHelper refreshes the Anthropic token independently.
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
-    os.execvp(binary, [binary, "--settings", str(CLAUDE_SETTINGS_PATH), *tool_args])
+    exec_or_spawn(
+        [binary, "--settings", str(CLAUDE_SETTINGS_PATH), *tool_args],
+        env=dict(os.environ),
+    )
 
 
 def validate_cmd(binary: str) -> list[str]:

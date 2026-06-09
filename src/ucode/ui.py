@@ -200,15 +200,26 @@ def prompt_for_workspace(
     `profiles` is a list of (host_url, profile_name) tuples. Caller fetches
     them — `ui.py` stays Databricks-agnostic. Returns ``(url, profile_name)``;
     profile_name is ``None`` when the user typed a URL manually.
+
+    When a host appears more than once (e.g. a DEFAULT and a named profile both
+    point at it), each profile is listed as its own choice labelled with its
+    profile name so the selection is unambiguous; the chosen profile name
+    threads straight through as ``--profile``.
     """
     console.print()
     console.print(Panel(description, title="ucode setup", style="bold blue", expand=False))
 
     if profiles:
-        choices = [
-            questionary.Choice(title=host, value=(host, profile_name))
-            for host, profile_name in profiles
-        ]
+        host_counts: dict[str, int] = {}
+        for host, _profile_name in profiles:
+            host_counts[host] = host_counts.get(host, 0) + 1
+        choices = []
+        for host, profile_name in profiles:
+            if host_counts[host] > 1 and profile_name:
+                title = f"{host}  (profile: {profile_name})"
+            else:
+                title = host
+            choices.append(questionary.Choice(title=title, value=(host, profile_name)))
         choices.append(questionary.Choice(title="Enter a different URL", value=None))
         style = questionary.Style(
             [

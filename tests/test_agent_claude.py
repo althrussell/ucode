@@ -325,17 +325,17 @@ class TestRegisterWebSearchMcp:
 
 class TestClaudeLaunch:
     def test_sets_oauth_token_before_exec(self, monkeypatch):
-        exec_calls: list[tuple[str, list[str]]] = []
+        exec_calls: list[tuple[list[str], dict | None]] = []
 
-        def fake_execvp(binary: str, args: list[str]) -> None:
-            exec_calls.append((binary, args))
+        def fake_exec_or_spawn(argv: list[str], env: dict | None = None) -> None:
+            exec_calls.append((argv, env))
             raise RuntimeError("stop")
 
         monkeypatch.delenv("OAUTH_TOKEN", raising=False)
         monkeypatch.setattr(
             claude, "get_databricks_token", lambda workspace, profile=None: "fresh-token"
         )
-        monkeypatch.setattr(os, "execvp", fake_execvp)
+        monkeypatch.setattr(claude, "exec_or_spawn", fake_exec_or_spawn)
 
         try:
             claude.launch({"workspace": WS}, ["--debug"])
@@ -343,9 +343,12 @@ class TestClaudeLaunch:
             assert str(exc) == "stop"
 
         assert os.environ["OAUTH_TOKEN"] == "fresh-token"
-        assert exec_calls == [
-            (
-                "claude",
-                ["claude", "--settings", str(claude.CLAUDE_SETTINGS_PATH), "--debug"],
-            )
+        assert len(exec_calls) == 1
+        argv, env = exec_calls[0]
+        assert argv == [
+            "claude",
+            "--settings",
+            str(claude.CLAUDE_SETTINGS_PATH),
+            "--debug",
         ]
+        assert env is not None and env["OAUTH_TOKEN"] == "fresh-token"

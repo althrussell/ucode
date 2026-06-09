@@ -16,10 +16,11 @@ from ucode.config_io import (
     write_toml_file,
 )
 from ucode.databricks import (
-    build_auth_shell_command,
+    build_auth_helper_argv,
     build_tool_base_url,
     get_databricks_token,
 )
+from ucode.process import exec_or_spawn
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 
@@ -102,7 +103,10 @@ def _use_legacy_layout() -> bool:
 
 
 def _provider_block(workspace: str, databricks_profile: str | None) -> dict:
-    auth_command = build_auth_shell_command(workspace, databricks_profile)
+    # Codex runs auth.command/args directly (no shell), so the cross-platform
+    # `ucode auth-token` invocation works identically on Windows and POSIX with
+    # no `sh`/`jq` dependency.
+    auth_argv = build_auth_helper_argv(workspace, databricks_profile)
     base_url = build_tool_base_url("codex", workspace)
     return {
         "name": "Databricks AI Gateway",
@@ -112,8 +116,8 @@ def _provider_block(workspace: str, databricks_profile: str | None) -> dict:
             "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
         },
         "auth": {
-            "command": "sh",
-            "args": ["-c", auth_command],
+            "command": auth_argv[0],
+            "args": auth_argv[1:],
             "timeout_ms": 5000,
             "refresh_interval_ms": 900000,
         },
@@ -278,8 +282,13 @@ def launch(state: dict, tool_args: list[str]) -> None:
     binary = SPEC["binary"]
     workspace = state.get("workspace")
     if workspace:
+        # OAUTH_TOKEN is still needed for MCP `${OAUTH_TOKEN}` headers; the
+        # auth.command refreshes the gateway token independently.
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
-    os.execvp(binary, [binary, "--profile", CODEX_PROFILE_NAME, *tool_args])
+    exec_or_spawn(
+        [binary, "--profile", CODEX_PROFILE_NAME, *tool_args],
+        env=dict(os.environ),
+    )
 
 
 def validate_cmd(binary: str) -> list[str]:

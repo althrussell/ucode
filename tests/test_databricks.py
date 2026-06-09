@@ -11,17 +11,24 @@ import pytest
 import ucode.databricks as db_mod
 from ucode.databricks import (
     AI_GATEWAY_V2_DOCS_URL,
+    MIN_NODE_MAJOR,
     _format_subprocess_result,
     _parse_databricks_cli_version,
     _scrub_databrickscfg,
     _scrub_json,
-    build_auth_shell_command,
+    build_auth_helper_argv,
+    build_auth_helper_string,
     build_databricks_cli_env,
     build_opencode_base_urls,
     build_shared_base_urls,
     build_tool_base_url,
     ensure_databricks_cli_version,
+    ensure_node_npm,
+    find_host_for_profile,
+    find_profile_name_for_host,
     get_databricks_token,
+    latest_databricks_cli_version,
+    list_all_databricks_profiles,
     list_databricks_apps,
     list_databricks_connections,
     list_genie_spaces,
@@ -131,69 +138,174 @@ class TestDiscoverClaudeModels:
         assert models["opus"] == "databricks-claude-opus-4-8"
 
 
-class TestBuildAuthShellCommand:
-    def test_contains_workspace(self):
-        cmd = build_auth_shell_command(WS)
-        assert WS in cmd
+class TestBuildAuthHelper:
+    def test_argv_contains_workspace_and_subcommand(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "resolve_ucode_invocation", lambda: ["/abs/ucode"])
+        argv = build_auth_helper_argv(WS)
+        assert argv == ["/abs/ucode", "auth-token", "--host", WS]
 
-    def test_parses_access_token(self):
-        cmd = build_auth_shell_command(WS)
-        assert "jq" in cmd
-        assert ".access_token" in cmd
-        assert "--force-refresh" in cmd
-        assert "DATABRICKS_BEARER" in cmd
-        assert "DATABRICKS_CONFIG_PROFILE" in cmd
+    def test_argv_includes_profile(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "resolve_ucode_invocation", lambda: ["/abs/ucode"])
+        argv = build_auth_helper_argv(WS, profile="stablebox")
+        assert argv == ["/abs/ucode", "auth-token", "--host", WS, "--profile", "stablebox"]
 
-    def test_returns_token_when_auth_succeeds(self, tmp_path):
-        # Fake databricks binary that always returns a valid token JSON.
-        fake = tmp_path / "databricks"
-        fake.write_text(
-            '#!/bin/sh\necho \'{"access_token": "good-token", "token_type": "Bearer"}\'\n'
+    def test_argv_strips_trailing_slash(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "resolve_ucode_invocation", lambda: ["/abs/ucode"])
+        argv = build_auth_helper_argv(WS + "/")
+        assert argv[3] == WS
+
+    def test_string_is_double_quoted(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "resolve_ucode_invocation", lambda: ["C:\\Users\\First Last\\ucode.exe"]
         )
-        fake.chmod(0o755)
-        cmd = build_auth_shell_command(WS)
-        result = subprocess.run(
-            ["sh", "-c", cmd],
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                "PATH": f"{tmp_path}:{os.environ['PATH']}",
-                "DATABRICKS_BEARER": "",
-            },
+        cmd = build_auth_helper_string(WS, profile="my profile")
+        assert cmd == (
+            '"C:\\Users\\First Last\\ucode.exe" "auth-token" "--host" '
+            f'"{WS}" "--profile" "my profile"'
         )
-        assert result.stdout.strip() == "good-token"
 
-    def test_prefers_databricks_bearer(self, tmp_path):
-        fake = tmp_path / "databricks"
-        fake.write_text("#!/bin/sh\nexit 1\n")
-        fake.chmod(0o755)
-        cmd = build_auth_shell_command(WS)
-        result = subprocess.run(
-            ["sh", "-c", cmd],
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                "PATH": f"{tmp_path}:{os.environ['PATH']}",
-                "DATABRICKS_BEARER": "bearer-token",
-            },
+    def test_no_legacy_shell_dependencies(self, monkeypatch):
+        # The cross-platform helper must not reintroduce jq/sh/env -u anywhere.
+        monkeypatch.setattr(db_mod, "resolve_ucode_invocation", lambda: ["/abs/ucode"])
+        cmd = build_auth_helper_string(WS, profile="stablebox")
+        for forbidden in ("jq", "sh -c", "env -u", ".access_token"):
+            assert forbidden not in cmd
+
+
+def _profiles_response(profiles: list[dict]) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(
+        args=["databricks", "auth", "profiles"],
+        returncode=0,
+        stdout=json.dumps({"profiles": profiles}),
+        stderr="",
+    )
+
+
+class TestDuplicateHostProfiles:
+    DUP = [
+        {"name": "DEFAULT", "host": "https://ws.databricks.com", "auth_type": "databricks-cli"},
+        {"name": "workshop", "host": "https://ws.databricks.com", "auth_type": "databricks-cli"},
+        {"name": "patbox", "host": "https://other.databricks.com", "auth_type": "pat"},
+    ]
+
+    def test_list_all_keeps_duplicates_and_pat(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "run", lambda *a, **k: _profiles_response(self.DUP))
+        result = list_all_databricks_profiles()
+        assert ("https://ws.databricks.com", "DEFAULT", "databricks-cli") in result
+        assert ("https://ws.databricks.com", "workshop", "databricks-cli") in result
+        # PAT profiles are NOT filtered out.
+        assert ("https://other.databricks.com", "patbox", "pat") in result
+        assert len(result) == 3
+
+    def test_find_profile_prefers_default(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "run", lambda *a, **k: _profiles_response(self.DUP))
+        assert find_profile_name_for_host("https://ws.databricks.com") == "DEFAULT"
+
+    def test_find_profile_never_none_when_only_pat(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "run", lambda *a, **k: _profiles_response(self.DUP))
+        # A host whose only profile is PAT still resolves a deterministic name.
+        assert find_profile_name_for_host("https://other.databricks.com") == "patbox"
+
+    def test_find_profile_none_when_no_match(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "run", lambda *a, **k: _profiles_response(self.DUP))
+        assert find_profile_name_for_host("https://nope.databricks.com") is None
+
+    def test_find_host_for_profile(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "run", lambda *a, **k: _profiles_response(self.DUP))
+        assert find_host_for_profile("workshop") == "https://ws.databricks.com"
+        assert find_host_for_profile("missing") is None
+
+
+class TestLatestDatabricksCliVersion:
+    def test_parses_tag(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_github_get_json", lambda *a, **k: ({"tag_name": "v0.305.1"}, None)
         )
-        assert result.stdout.strip() == "bearer-token"
+        assert latest_databricks_cli_version() == (0, 305, 1)
 
-    def test_embeds_profile_when_provided(self):
-        cmd = build_auth_shell_command(WS, profile="stablebox")
-        assert "--profile stablebox" in cmd
-        # We do not strip DATABRICKS_CONFIG_PROFILE when we are explicit about
-        # which profile to use — the --profile flag wins.
-        assert "env -u DATABRICKS_CONFIG_PROFILE" not in cmd
+    def test_returns_none_on_failure(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_github_get_json", lambda *a, **k: (None, "HTTP 403 rate limited")
+        )
+        assert latest_databricks_cli_version() is None
 
-    def test_quotes_profile_shell_metacharacters(self):
-        cmd = build_auth_shell_command(WS, profile="weird name; rm -rf /")
-        # shlex.quote should wrap the value so the rest of the command cannot
-        # be interpreted as a shell injection.
-        assert "rm -rf /" in cmd
-        assert "'weird name; rm -rf /'" in cmd
+    def test_returns_none_on_unparseable_tag(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod, "_github_get_json", lambda *a, **k: ({"tag_name": "latest"}, None)
+        )
+        assert latest_databricks_cli_version() is None
+
+
+class TestEnsureDatabricksCliLatest:
+    def test_offline_falls_back_to_minimum_check(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "latest_databricks_cli_version", lambda: None)
+        called = []
+        monkeypatch.setattr(db_mod, "ensure_databricks_cli_version", lambda: called.append(True))
+        db_mod.ensure_databricks_cli_latest()
+        assert called == [True]
+
+    def test_upgrades_when_behind(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "latest_databricks_cli_version", lambda: (0, 305, 1))
+        monkeypatch.setattr(db_mod, "_installed_databricks_cli_version", lambda: (0, 300, 0))
+        installs: list[str] = []
+        monkeypatch.setattr(
+            db_mod,
+            "_run_databricks_cli_installer",
+            lambda brew_subcommand="install": installs.append(brew_subcommand),
+        )
+        monkeypatch.setattr(db_mod, "ensure_databricks_cli_version", lambda: None)
+        db_mod.ensure_databricks_cli_latest()
+        assert installs == ["upgrade"]
+
+    def test_noop_when_current(self, monkeypatch):
+        monkeypatch.setattr(db_mod, "latest_databricks_cli_version", lambda: (0, 305, 1))
+        monkeypatch.setattr(db_mod, "_installed_databricks_cli_version", lambda: (0, 305, 1))
+        installs: list[str] = []
+        monkeypatch.setattr(
+            db_mod,
+            "_run_databricks_cli_installer",
+            lambda brew_subcommand="install": installs.append(brew_subcommand),
+        )
+        db_mod.ensure_databricks_cli_latest()
+        assert installs == []
+
+
+class TestEnsureNodeNpm:
+    def test_skips_when_current(self, monkeypatch):
+        monkeypatch.setattr(db_mod.shutil, "which", lambda name: "/usr/bin/npm")
+        monkeypatch.setattr(db_mod, "_node_major_version", lambda: MIN_NODE_MAJOR + 2)
+        calls: list[list[str]] = []
+        monkeypatch.setattr(db_mod, "run", lambda cmd, **k: calls.append(cmd))
+        ensure_node_npm()
+        assert calls == []
+
+    def test_installs_with_brew_on_darwin(self, monkeypatch):
+        monkeypatch.setattr(db_mod.platform, "system", lambda: "Darwin")
+
+        present = {"npm": False, "node": False, "brew": True}
+        monkeypatch.setattr(
+            db_mod.shutil,
+            "which",
+            lambda name: "/x" if present.get(name) else None,
+        )
+        monkeypatch.setattr(db_mod, "_node_major_version", lambda: None)
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **k):
+            calls.append(cmd)
+            present["npm"] = True
+            present["node"] = True
+
+        monkeypatch.setattr(db_mod, "run", fake_run)
+        ensure_node_npm()
+        assert calls == [["brew", "install", "node"]]
+
+    def test_raises_remediation_when_no_manager(self, monkeypatch):
+        monkeypatch.setattr(db_mod.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(db_mod.shutil, "which", lambda name: None)
+        monkeypatch.setattr(db_mod, "_node_major_version", lambda: None)
+        with pytest.raises(RuntimeError, match="Node.js/npm is required"):
+            ensure_node_npm()
 
 
 class TestFormatSubprocessResult:

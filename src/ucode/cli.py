@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+import sys
+from typing import Annotated, cast
 
 import typer
 from rich.panel import Panel
@@ -34,10 +35,13 @@ from ucode.databricks import (
     discover_gemini_models,
     ensure_ai_gateway_v2,
     ensure_databricks_auth,
+    ensure_databricks_cli_latest,
+    ensure_node_npm,
+    find_host_for_profile,
     find_profile_name_for_host,
-    get_databricks_profiles,
     get_databricks_token,
     install_databricks_cli,
+    list_all_databricks_profiles,
     normalize_workspace_url,
     run_databricks_login,
 )
@@ -47,7 +51,14 @@ from ucode.mcp import (
     purge_cross_workspace_mcp_residue,
     revert_mcp_configs,
 )
-from ucode.state import STATE_PATH, clear_state, load_full_state, load_state, save_state
+from ucode.state import (
+    STATE_PATH,
+    clear_state,
+    load_full_state,
+    load_state,
+    save_state,
+    set_current_workspace,
+)
 from ucode.tracing import configure_tracing_command
 from ucode.ui import (
     console,
@@ -96,8 +107,46 @@ def _prompt_for_configuration(tool: str | None = None) -> tuple[str, str | None]
     else:
         desc = f"Configure {TOOL_SPECS[tool]['display']} to use your Databricks endpoint."
     with spinner("Loading Databricks workspaces and profiles..."):
-        profiles = get_databricks_profiles()
+        # Pass every profile (including duplicate hosts and PAT profiles) so the
+        # picker can offer each one and the user can disambiguate a host that has
+        # both a DEFAULT and a named profile.
+        profiles = [(host, name) for host, name, _auth_type in list_all_databricks_profiles()]
     return prompt_for_workspace(desc, profiles)
+
+
+def _resolve_workspace_entries(
+    workspaces: str | None, profile: str | None
+) -> list[tuple[str, str | None]] | None:
+    """Resolve `--workspaces`/`--profile` into [(url, profile), ...] or None.
+
+    - ``--workspaces`` present: parse the URLs; when ``--profile`` is also given,
+      attach it to every entry.
+    - only ``--profile`` present: resolve the host from the named profile (fast
+      fail with remediation when the profile is unknown).
+    - neither: return None so the caller prompts interactively.
+    """
+    if workspaces is not None:
+        entries = _parse_workspaces_option(workspaces)
+        if profile:
+            entries = cast(
+                "list[tuple[str, str | None]]",
+                [(workspace, profile) for workspace, _ in entries],
+            )
+        return entries
+    if profile:
+        host = find_host_for_profile(profile)
+        if not host:
+            raise RuntimeError(_unknown_profile_message(profile))
+        return [(host, profile)]
+    return None
+
+
+def _unknown_profile_message(profile: str) -> str:
+    return (
+        f"Databricks profile '{profile}' was not found in ~/.databrickscfg.\n"
+        f"Create it with `databricks auth login --profile {profile}` "
+        f"or run `ucode setup --profile {profile} --workspaces <workspace-url>`."
+    )
 
 
 def _parse_agents_option(agents: str) -> list[str]:
@@ -480,11 +529,18 @@ def mcp_web_search_cmd() -> None:
     serve()
 
 
-def _auto_configure_tool(tool: str) -> None:
-    """First-time setup for a single tool — mirrors configure_workspace_command."""
+def _auto_configure_tool(
+    tool: str, profile: str | None = None, workspace: str | None = None
+) -> None:
+    """First-time setup for a single tool — mirrors configure_workspace_command.
+
+    ``profile``/``workspace`` override the saved state (used by `ucode <agent>
+    --profile`); when neither the override nor saved state has a workspace we
+    prompt interactively.
+    """
     existing = load_state()
-    workspace = existing.get("workspace")
-    profile = existing.get("profile")
+    workspace = workspace or existing.get("workspace")
+    profile = profile or existing.get("profile")
     if not workspace:
         workspace, profile = _prompt_for_configuration(tool)
     state = configure_shared_state(workspace, profile=profile, tools=[tool])
@@ -516,24 +572,40 @@ def _auto_configure_tool(tool: str) -> None:
         raise RuntimeError(f"{spec['display']} validation failed — config reverted.")
 
 
-def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
+def _launch_tool(tool_name: str, ctx: typer.Context, profile: str | None = None) -> None:
     try:
         tool = normalize_tool(tool_name)
+        override_workspace: str | None = None
+        if profile:
+            # Resolve the workspace the profile targets BEFORE deciding whether
+            # auto-configure is needed. An unknown profile fails fast with
+            # remediation rather than silently falling back to the default.
+            override_workspace = find_host_for_profile(profile)
+            if not override_workspace:
+                raise RuntimeError(_unknown_profile_message(profile))
+            # Point ucode at this workspace so the launch (and future plain
+            # `ucode <agent>` runs) target it.
+            set_current_workspace(override_workspace)
         existing = load_state()
-        needs_auto_configure = not existing.get("workspace") or tool not in (
-            existing.get("available_tools") or []
+        workspace = override_workspace or existing.get("workspace")
+        available_tools = existing.get("available_tools") or []
+        # A profile switch to a workspace where this tool isn't configured yet
+        # must re-run configuration for that workspace.
+        needs_auto_configure = (
+            not workspace
+            or (override_workspace is not None and existing.get("workspace") != override_workspace)
+            or tool not in available_tools
         )
         ensure_bootstrap_dependencies(tool, update_existing=needs_auto_configure)
         if needs_auto_configure:
-            _auto_configure_tool(tool)
+            _auto_configure_tool(tool, profile=profile, workspace=override_workspace)
         state = ensure_provider_state(tool)
         # Re-fetch model lists on every launch so newly-added Databricks
         # endpoints show up without a manual `ucode configure` (and so that
         # tools like pi which read multiple model bundles never run on
         # stale state from before a tool added a new bundle).
-        state = configure_shared_state(
-            state["workspace"], profile=state.get("profile"), tools=[tool]
-        )
+        launch_profile = profile or state.get("profile")
+        state = configure_shared_state(state["workspace"], profile=launch_profile, tools=[tool])
         state, resolved_model = resolve_launch_model(tool, state, None)
         state = configure_tool(tool, state, resolved_model)
         print_section(f"ucode with {TOOL_SPECS[tool]['display']}")
@@ -554,42 +626,253 @@ def _launch_tool(tool_name: str, ctx: typer.Context) -> None:
         raise typer.Exit(130) from None
 
 
+# Long-only `--profile`: never bind `-p`, which Claude/Codex use for prompts.
+# With the app-level ignore_unknown_options/allow_extra_args, Click still parses
+# this declared option and forwards the rest to the agent.
+_ProfileOption = Annotated[
+    str | None,
+    typer.Option(
+        "--profile",
+        help="Databricks CLI profile to target (resolves its workspace; "
+        "disambiguates duplicate hosts).",
+    ),
+]
+
+
 @app.command("codex", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def codex_cmd(ctx: typer.Context) -> None:
+def codex_cmd(ctx: typer.Context, profile: _ProfileOption = None) -> None:
     """Launch Codex via Databricks."""
-    _launch_tool("codex", ctx)
+    _launch_tool("codex", ctx, profile=profile)
 
 
 @app.command("claude", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def claude_cmd(ctx: typer.Context) -> None:
+def claude_cmd(ctx: typer.Context, profile: _ProfileOption = None) -> None:
     """Launch Claude Code via Databricks."""
-    _launch_tool("claude", ctx)
+    _launch_tool("claude", ctx, profile=profile)
 
 
 @app.command("gemini", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def gemini_cmd(ctx: typer.Context) -> None:
+def gemini_cmd(ctx: typer.Context, profile: _ProfileOption = None) -> None:
     """Launch Gemini CLI via Databricks."""
-    _launch_tool("gemini", ctx)
+    _launch_tool("gemini", ctx, profile=profile)
 
 
 @app.command(
     "opencode", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
 )
-def opencode_cmd(ctx: typer.Context) -> None:
+def opencode_cmd(ctx: typer.Context, profile: _ProfileOption = None) -> None:
     """Launch OpenCode via Databricks."""
-    _launch_tool("opencode", ctx)
+    _launch_tool("opencode", ctx, profile=profile)
 
 
 @app.command("copilot", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def copilot_cmd(ctx: typer.Context) -> None:
+def copilot_cmd(ctx: typer.Context, profile: _ProfileOption = None) -> None:
     """Launch GitHub Copilot CLI via Databricks."""
-    _launch_tool("copilot", ctx)
+    _launch_tool("copilot", ctx, profile=profile)
 
 
 @app.command("pi", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def pi_cmd(ctx: typer.Context) -> None:
+def pi_cmd(ctx: typer.Context, profile: _ProfileOption = None) -> None:
     """Launch Pi coding agent via Databricks."""
-    _launch_tool("pi", ctx)
+    _launch_tool("pi", ctx, profile=profile)
+
+
+@app.command("auth-token")
+def auth_token_cmd(
+    host: Annotated[
+        str | None,
+        typer.Option("--host", "--workspace", help="Workspace URL (defaults to saved state)."),
+    ] = None,
+    profile: Annotated[
+        str | None,
+        typer.Option("--profile", help="Databricks CLI profile (defaults to saved state)."),
+    ] = None,
+) -> None:
+    """Print a Databricks access token to stdout — the cross-platform credential
+    helper invoked by Claude's apiKeyHelper and Codex's auth.command.
+
+    stdout receives ONLY the bare token so a credential helper never feeds
+    decoration to the agent; every diagnostic goes to stderr and any failure
+    exits non-zero with empty stdout. Honors DATABRICKS_BEARER first (the CI
+    short-circuit), otherwise force-refreshes via the Databricks CLI without
+    ever opening a browser.
+    """
+    import os
+
+    bearer = os.environ.get("DATABRICKS_BEARER", "").strip()
+    if bearer:
+        sys.stdout.write(bearer)
+        sys.stdout.flush()
+        return
+
+    workspace = host
+    effective_profile = profile
+    if workspace is None or effective_profile is None:
+        state = load_state()
+        workspace = workspace or state.get("workspace")
+        if effective_profile is None:
+            effective_profile = state.get("profile")
+    if not workspace:
+        print(
+            "auth-token: no --host provided and no workspace is configured. "
+            "Pass --host or run `ucode configure`.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(1)
+    try:
+        token = get_databricks_token(workspace, effective_profile, force_refresh=True)
+    except RuntimeError as exc:
+        print(f"auth-token: {exc}", file=sys.stderr)
+        raise typer.Exit(1) from None
+    if not token:
+        print("auth-token: Databricks returned an empty token.", file=sys.stderr)
+        raise typer.Exit(1)
+    sys.stdout.write(token)
+    sys.stdout.flush()
+
+
+@app.command("setup")
+def setup_cmd(
+    profile: Annotated[
+        str | None,
+        typer.Option("--profile", help="Databricks CLI profile to target/create."),
+    ] = None,
+    workspaces: Annotated[
+        str | None,
+        typer.Option("--workspaces", help="Comma-separated workspace URLs (no prompt when given)."),
+    ] = None,
+    agents: Annotated[
+        str | None,
+        typer.Option("--agents", help="Comma-separated agents to configure (e.g. claude,codex)."),
+    ] = None,
+    tracing: Annotated[
+        bool, typer.Option("--tracing", help="Also enable MLflow tracing for the workspace(s).")
+    ] = False,
+    skip_upgrade: Annotated[
+        bool,
+        typer.Option(
+            "--skip-upgrade",
+            help="Skip dependency upgrades (still installs anything missing).",
+        ),
+    ] = False,
+    verbose: Annotated[
+        str, typer.Option("--verbose", help="Output verbosity: 'normal' or 'low'.")
+    ] = "normal",
+) -> None:
+    """Zero-manual, idempotent provisioning: bring every dependency up to date,
+    then configure and validate the requested agents.
+
+    Used by the bootstrap one-liner and safe to re-run any time. Fully
+    non-interactive when --agents/--profile/--workspaces are supplied (the
+    workshop one-command path); otherwise prompts only for what's missing.
+    """
+    if verbose not in ("normal", "low"):
+        print_err("--verbose must be one of: normal, low.")
+        raise typer.Exit(2)
+    set_verbosity(verbose)
+    try:
+        rc = _run_setup(
+            profile=profile,
+            workspaces=workspaces,
+            agents=agents,
+            tracing=tracing,
+            skip_upgrade=skip_upgrade,
+        )
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
+    raise typer.Exit(rc)
+
+
+def _run_setup(
+    *,
+    profile: str | None,
+    workspaces: str | None,
+    agents: str | None,
+    tracing: bool,
+    skip_upgrade: bool,
+) -> int:
+    """Orchestrate dependency provisioning + configuration, aggregating failures.
+
+    Continues past non-fatal step failures and returns non-zero only when a
+    critical step (dependency or configuration) fails, so a partially-broken
+    machine surfaces every problem in one pass instead of aborting on the first.
+    """
+    print_section("ucode setup")
+    results: list[tuple[str, bool, str]] = []
+    prompt_optional_updates = not skip_upgrade
+
+    # 1. Databricks CLI -> latest (falls back to minimum check when offline).
+    try:
+        install_databricks_cli()
+        if not skip_upgrade:
+            ensure_databricks_cli_latest()
+        results.append(("Databricks CLI", True, ""))
+    except RuntimeError as exc:
+        results.append(("Databricks CLI", False, str(exc)))
+
+    # 2. Node.js / npm (required for the npm-distributed agent CLIs).
+    try:
+        ensure_node_npm()
+        results.append(("Node.js / npm", True, ""))
+    except RuntimeError as exc:
+        results.append(("Node.js / npm", False, str(exc)))
+
+    # 3. Configure + validate the requested agents.
+    selected_tools: list[str] | None = None
+    configured_ok = True
+    try:
+        selected_tools = _parse_agents_option(agents) if agents else None
+        workspace_entries = _resolve_workspace_entries(workspaces, profile)
+        if selected_tools is not None:
+            configure_workspace_command(
+                selected_tools=selected_tools,
+                workspaces=workspace_entries,
+                prompt_optional_updates=prompt_optional_updates,
+            )
+        else:
+            configure_workspace_command(
+                workspaces=workspace_entries,
+                prompt_optional_updates=prompt_optional_updates,
+            )
+        if tracing:
+            tracing_workspaces = workspace_entries
+            if tracing_workspaces is None:
+                current = load_full_state().get("current_workspace")
+                tracing_workspaces = [(current, profile)] if current else None
+            if tracing_workspaces:
+                configure_tracing_command(workspaces=tracing_workspaces)
+        results.append(("Configure agents", True, ""))
+    except RuntimeError as exc:
+        configured_ok = False
+        results.append(("Configure agents", False, str(exc)))
+
+    # 4. Validation pass via doctor (read-only).
+    from ucode.doctor import run_doctor
+
+    doctor_workspace = None
+    if not workspaces and not profile:
+        doctor_workspace = load_full_state().get("current_workspace")
+    doctor_rc = run_doctor(
+        profile=profile,
+        workspace=doctor_workspace,
+        agents=selected_tools,
+        fix=False,
+    )
+
+    # 5. Summary.
+    print_section("Setup summary")
+    for name, ok, detail in results:
+        if ok:
+            print_success(name)
+        else:
+            print_err(f"{name}: {detail}")
+    critical_ok = all(ok for _name, ok, _detail in results) and configured_ok
+    if critical_ok and doctor_rc == 0:
+        print_success("ucode is ready. Launch an agent with `ucode claude` (or codex/gemini/...).")
+        return 0
+    print_note("Re-run `ucode setup` after addressing the issues above; it is safe to repeat.")
+    return 1
 
 
 @configure_app.callback(invoke_without_command=True)
@@ -617,6 +900,14 @@ def configure(
         typer.Option(
             "--workspaces",
             help="Configure a comma-separated list of workspaces without prompting.",
+        ),
+    ] = None,
+    profile: Annotated[
+        str | None,
+        typer.Option(
+            "--profile",
+            help="Databricks CLI profile to target/create. When --workspaces is omitted, "
+            "the workspace is resolved from this profile.",
         ),
     ] = None,
     tracing: Annotated[
@@ -657,7 +948,7 @@ def configure(
         install_databricks_cli()
         if agent is not None and agents is not None:
             raise RuntimeError("Use either --agent or --agents, not both.")
-        workspace_entries = _parse_workspaces_option(workspaces) if workspaces is not None else None
+        workspace_entries = _resolve_workspace_entries(workspaces, profile)
         if agent is not None:
             tool = normalize_tool(agent)
             install_tool_binary(
@@ -700,7 +991,7 @@ def configure(
             tracing_workspaces = workspace_entries
             if tracing_workspaces is None:
                 current = load_full_state().get("current_workspace")
-                tracing_workspaces = [(current, None)] if current else None
+                tracing_workspaces = [(current, profile)] if current else None
             if tracing_workspaces:
                 configure_tracing_command(workspaces=tracing_workspaces)
     except RuntimeError as exc:
@@ -762,6 +1053,39 @@ def revert_cmd() -> None:
         raise typer.Exit(1) from None
 
 
+@app.command("doctor")
+def doctor_cmd(
+    profile: Annotated[
+        str | None, typer.Option("--profile", help="Databricks CLI profile to validate.")
+    ] = None,
+    workspace: Annotated[
+        str | None,
+        typer.Option("--workspace", "--host", help="Workspace URL (defaults to saved state)."),
+    ] = None,
+    agents: Annotated[
+        str | None,
+        typer.Option("--agents", help="Comma-separated agents to validate (e.g. claude,codex)."),
+    ] = None,
+    fix: Annotated[
+        bool, typer.Option("--fix", help="Auto-install/upgrade fixable problems.")
+    ] = False,
+) -> None:
+    """Validate dependencies, Databricks auth, the AI Gateway, agents, and the
+    cross-platform credential helper. Exits non-zero if any critical check fails."""
+    from ucode.doctor import run_doctor
+
+    try:
+        agent_list = _parse_agents_option(agents) if agents else None
+        rc = run_doctor(profile=profile, workspace=workspace, agents=agent_list, fix=fix)
+    except RuntimeError as exc:
+        print_err(str(exc))
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        print_err("Interrupted.")
+        raise typer.Exit(130) from None
+    raise typer.Exit(rc)
+
+
 @app.command("usage")
 def usage_cmd() -> None:
     """Show Databricks AI Gateway usage summary (last 7 days)."""
@@ -778,7 +1102,7 @@ def upgrade_cmd() -> None:
     """Upgrade ucode to the latest version from GitHub."""
     import subprocess
 
-    git_url = "git+https://github.com/databricks/ucode"
+    git_url = "git+https://github.com/althrussell/ucode"
     print_section("Upgrade")
     print_kv("Source", git_url)
     try:
