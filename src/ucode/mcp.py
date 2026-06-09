@@ -32,6 +32,7 @@ from ucode.databricks import (
     list_genie_spaces,
     workspace_hostname,
 )
+from ucode.process import windows_safe_args
 from ucode.state import load_full_state, load_state, save_state
 from ucode.ui import (
     print_note,
@@ -98,7 +99,7 @@ def build_mcp_http_entry(url: str) -> dict:
 def add_claude_mcp_server(name: str, entry: dict, scope: str = MCP_USER_SCOPE) -> None:
     try:
         subprocess.run(
-            ["claude", "mcp", "add-json", name, json.dumps(entry), "-s", scope],
+            windows_safe_args(["claude", "mcp", "add-json", name, json.dumps(entry), "-s", scope]),
             check=True,
             capture_output=True,
             text=True,
@@ -121,7 +122,7 @@ def _is_missing_mcp_server_output(output: str) -> bool:
 def remove_claude_mcp_server(name: str, scope: str) -> bool:
     try:
         subprocess.run(
-            ["claude", "mcp", "remove", name, "-s", scope],
+            windows_safe_args(["claude", "mcp", "remove", name, "-s", scope]),
             check=True,
             capture_output=True,
             text=True,
@@ -138,16 +139,18 @@ def remove_claude_mcp_server(name: str, scope: str) -> bool:
 def add_codex_mcp_server(name: str, url: str) -> None:
     try:
         subprocess.run(
-            [
-                "codex",
-                "mcp",
-                "add",
-                name,
-                "--url",
-                url,
-                "--bearer-token-env-var",
-                MCP_AUTH_TOKEN_ENV_VAR,
-            ],
+            windows_safe_args(
+                [
+                    "codex",
+                    "mcp",
+                    "add",
+                    name,
+                    "--url",
+                    url,
+                    "--bearer-token-env-var",
+                    MCP_AUTH_TOKEN_ENV_VAR,
+                ]
+            ),
             check=True,
             capture_output=True,
             text=True,
@@ -160,7 +163,7 @@ def add_codex_mcp_server(name: str, url: str) -> None:
 def remove_codex_mcp_server(name: str) -> bool:
     try:
         result = subprocess.run(
-            ["codex", "mcp", "remove", name],
+            windows_safe_args(["codex", "mcp", "remove", name]),
             check=False,
             capture_output=True,
             text=True,
@@ -180,19 +183,21 @@ def remove_codex_mcp_server(name: str) -> bool:
 def add_gemini_mcp_server(name: str, url: str) -> None:
     try:
         subprocess.run(
-            [
-                "gemini",
-                "mcp",
-                "add",
-                name,
-                url,
-                "--type",
-                "http",
-                "--scope",
-                MCP_USER_SCOPE,
-                "--header",
-                f"Authorization: Bearer ${{{MCP_AUTH_TOKEN_ENV_VAR}}}",
-            ],
+            windows_safe_args(
+                [
+                    "gemini",
+                    "mcp",
+                    "add",
+                    name,
+                    url,
+                    "--type",
+                    "http",
+                    "--scope",
+                    MCP_USER_SCOPE,
+                    "--header",
+                    f"Authorization: Bearer ${{{MCP_AUTH_TOKEN_ENV_VAR}}}",
+                ]
+            ),
             check=True,
             capture_output=True,
             text=True,
@@ -205,7 +210,7 @@ def add_gemini_mcp_server(name: str, url: str) -> None:
 def remove_gemini_mcp_server(name: str) -> bool:
     try:
         result = subprocess.run(
-            ["gemini", "mcp", "remove", name, "--scope", MCP_USER_SCOPE],
+            windows_safe_args(["gemini", "mcp", "remove", name, "--scope", MCP_USER_SCOPE]),
             check=False,
             capture_output=True,
             text=True,

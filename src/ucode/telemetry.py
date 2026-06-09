@@ -14,6 +14,8 @@ import subprocess
 from functools import cache
 from importlib.metadata import PackageNotFoundError, version
 
+from ucode.process import windows_safe_args
+
 _SEMVER_RE = re.compile(r"\d+\.\d+\.\d+[-+0-9A-Za-z.]*")
 
 
@@ -35,7 +37,7 @@ def agent_version(binary: str) -> str:
     """
     try:
         result = subprocess.run(
-            [binary, "--version"],
+            windows_safe_args([binary, "--version"]),
             capture_output=True,
             text=True,
             timeout=2,

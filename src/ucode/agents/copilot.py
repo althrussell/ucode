@@ -35,6 +35,7 @@ from ucode.databricks import (
     build_copilot_base_url,
     get_databricks_token,
 )
+from ucode.process import windows_safe_args
 from ucode.state import mark_tool_managed, save_state
 
 COPILOT_CONFIG_DIR = Path.home() / ".copilot"
@@ -185,7 +186,9 @@ def launch(state: dict, tool_args: list[str]) -> None:
     )
     refresher.start()
 
-    proc = subprocess.Popen([SPEC["binary"], *mcp_config_args(), *tool_args], env=env)
+    proc = subprocess.Popen(
+        windows_safe_args([SPEC["binary"], *mcp_config_args(), *tool_args]), env=env
+    )
     try:
         returncode = proc.wait()
     except KeyboardInterrupt:

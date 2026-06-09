@@ -31,6 +31,7 @@ from ucode.databricks import (
     normalize_workspace_url,
     resolve_ucode_invocation,
 )
+from ucode.process import windows_safe_args
 from ucode.state import load_state
 from ucode.telemetry import agent_version
 from ucode.ui import console, print_section, status_badge
@@ -320,7 +321,9 @@ def _smoke_test_helper(doc: _Doctor, workspace: str, profile: str | None) -> Non
     if profile:
         argv += ["--profile", profile]
     try:
-        result = subprocess.run(argv, check=False, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            windows_safe_args(argv), check=False, capture_output=True, text=True, timeout=30
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         doc.record(
             "Credential helper smoke test",

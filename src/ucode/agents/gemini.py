@@ -24,6 +24,7 @@ from ucode.databricks import (
     build_tool_base_url,
     get_databricks_token,
 )
+from ucode.process import windows_safe_args
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 
@@ -148,7 +149,7 @@ def launch(state: dict, tool_args: list[str]) -> None:
     )
     refresher.start()
 
-    proc = subprocess.Popen([SPEC["binary"], *tool_args], env=env)
+    proc = subprocess.Popen(windows_safe_args([SPEC["binary"], *tool_args]), env=env)
     try:
         returncode = proc.wait()
     except KeyboardInterrupt:

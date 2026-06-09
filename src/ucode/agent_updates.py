@@ -6,13 +6,15 @@ import json
 import shutil
 import subprocess
 
+from ucode.process import windows_safe_args
+
 
 def available_npm_package_update(package: str) -> tuple[str, str] | None:
     if not shutil.which("npm"):
         return None
     try:
         result = subprocess.run(
-            ["npm", "outdated", "-g", "--json", package],
+            windows_safe_args(["npm", "outdated", "-g", "--json", package]),
             capture_output=True,
             text=True,
             timeout=10,

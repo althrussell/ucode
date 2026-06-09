@@ -20,6 +20,7 @@ from ucode.config_io import ToolSpec
 from ucode.databricks import (
     install_databricks_cli,
 )
+from ucode.process import windows_safe_args
 from ucode.state import load_state, save_state
 from ucode.telemetry import agent_version
 from ucode.ui import (
@@ -82,7 +83,9 @@ def _update_installed_tool_binary(tool: str) -> bool:
 
     print_note(f"Updating {spec['display']}...")
     try:
-        subprocess.run(["npm", "install", "-g", package], check=True, timeout=300)
+        subprocess.run(
+            windows_safe_args(["npm", "install", "-g", package]), check=True, timeout=300
+        )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         print_warning(f"Could not update {spec['display']}; continuing.")
         return False
@@ -154,7 +157,9 @@ def install_tool_binary(
     print_section("Bootstrap")
     print_warning(f"`{binary}` was not found. Installing {spec['display']}...")
     try:
-        subprocess.run(["npm", "install", "-g", package], check=True, timeout=300)
+        subprocess.run(
+            windows_safe_args(["npm", "install", "-g", package]), check=True, timeout=300
+        )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         message = f"Failed to install {spec['display']} automatically."
         if strict:
@@ -379,7 +384,7 @@ def validate_tool(tool: str) -> tuple[bool, str]:
             env = None
     try:
         result = subprocess.run(
-            cmd, check=False, capture_output=True, text=True, timeout=60, env=env
+            windows_safe_args(cmd), check=False, capture_output=True, text=True, timeout=60, env=env
         )
         if result.returncode == 0:
             return True, ""

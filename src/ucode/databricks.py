@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from databricks.sql.exc import ServerOperationError
 
 from ucode.config_io import APP_DIR
+from ucode.process import refresh_windows_path, windows_safe_args
 from ucode.ui import (
     err_console,
     normalize_workspace_url,
@@ -153,7 +154,7 @@ def _log_auth_diagnostics() -> None:
 
     try:
         version_result = subprocess.run(
-            ["databricks", "--version"],
+            windows_safe_args(["databricks", "--version"]),
             check=False,
             capture_output=True,
             text=True,
@@ -166,7 +167,7 @@ def _log_auth_diagnostics() -> None:
 
     try:
         profiles_result = subprocess.run(
-            ["databricks", "auth", "profiles", "--output", "json"],
+            windows_safe_args(["databricks", "auth", "profiles", "--output", "json"]),
             check=False,
             capture_output=True,
             text=True,
@@ -472,7 +473,7 @@ def run(
     timeout: int | None = None,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     return subprocess.run(
-        args,
+        windows_safe_args(args),
         check=check,
         capture_output=capture_output,
         text=text,
@@ -583,6 +584,9 @@ def ensure_databricks_cli_version() -> None:
 
 
 def install_databricks_cli() -> None:
+    # A prior winget/MSI install may have updated the persisted PATH without this
+    # process seeing it; reload before deciding whether to (re)install.
+    refresh_windows_path()
     if shutil.which("databricks"):
         ensure_databricks_cli_version()
         return
@@ -590,10 +594,15 @@ def install_databricks_cli() -> None:
     print_section("Bootstrap")
     print_warning("`databricks` was not found. Installing Databricks CLI...")
     _run_databricks_cli_installer(brew_subcommand="install")
+    # winget appends its Links dir to the persisted PATH; pull it in so the
+    # just-installed `databricks` is resolvable without a terminal restart.
+    refresh_windows_path()
 
     if not shutil.which("databricks"):
         raise RuntimeError(
-            "Databricks CLI install completed, but `databricks` is still not on PATH."
+            "Databricks CLI install completed, but `databricks` is still not on PATH.\n"
+            "Open a NEW terminal and re-run `ucode setup` (Windows applies PATH "
+            "changes to new shells only)."
         )
     # A fresh install should land on the newest release, not merely the minimum.
     ensure_databricks_cli_latest()
@@ -731,6 +740,8 @@ def ensure_node_npm() -> None:
     it only raises (with platform-specific remediation) when no usable npm can
     be produced.
     """
+    # Pick up any PATH changes a prior install persisted before probing.
+    refresh_windows_path()
     have_npm = bool(shutil.which("npm"))
     node_major = _node_major_version()
     if have_npm and node_major is not None and node_major >= MIN_NODE_MAJOR:
@@ -777,6 +788,9 @@ def ensure_node_npm() -> None:
             return
         _raise_node_remediation(system, exc)
 
+    # winget/MSI Node installs land on a PATH entry the running process can't see
+    # yet; reload it so the npm-based agent installs that follow can find npm.
+    refresh_windows_path()
     if not shutil.which("npm"):
         _raise_node_remediation(system)
 
