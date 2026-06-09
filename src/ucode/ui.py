@@ -228,15 +228,55 @@ def prompt_for_workspace(
                 ("answer", "fg:cyan"),
             ]
         )
-        choice = questionary.select(
-            "Select workspace:", choices=choices, style=style, pointer="›", qmark=""
-        ).ask()
+        try:
+            choice = questionary.select(
+                "Select workspace:", choices=choices, style=style, pointer="›", qmark=""
+            ).ask()
+        except (OSError, EOFError):
+            # The interactive TUI needs a clean, pollable terminal. Some
+            # environments (notably `curl ... | sh` pipelines, certain SSH/CI
+            # shells) leave stdin attached to a device prompt_toolkit's asyncio
+            # input loop can't register, raising OSError/EOFError. Fall back to a
+            # numbered text menu so configuration still completes.
+            return _prompt_for_workspace_text(profiles)
         if isinstance(choice, tuple):
             host, profile_name = choice
             return normalize_workspace_url(host), profile_name
 
+    return _prompt_for_workspace_text(profiles)
+
+
+def _prompt_for_workspace_text(
+    profiles: list[tuple[str, str]] | None,
+) -> tuple[str, str | None]:
+    """Plain-text workspace prompt used when the rich picker can't run.
+
+    Lists known profiles as numbered choices (pick by number) and always allows
+    typing a URL. Uses ``input()`` only, so it works on any terminal.
+    """
+    if profiles:
+        console.print("  Known workspaces (type the number, or paste a URL):")
+        for idx, (host, profile_name) in enumerate(profiles, start=1):
+            label = f"{host}  (profile: {profile_name})" if profile_name else host
+            console.print(f"    [bold]{idx}[/bold]. {label}")
     while True:
-        raw_value = console.input(f"  [bold]Workspace URL[/bold] {muted('›')} ").strip()
+        try:
+            raw_value = input("  Workspace URL or number > ").strip()
+        except EOFError:
+            raise RuntimeError(
+                "Could not read a workspace selection from input.\n"
+                "Re-run in a terminal, or pass it non-interactively:\n"
+                "  ucode setup --workspaces https://your-workspace.cloud.databricks.com"
+            ) from None
+        if not raw_value:
+            continue
+        if profiles and raw_value.isdigit():
+            index = int(raw_value)
+            if 1 <= index <= len(profiles):
+                host, profile_name = profiles[index - 1]
+                return normalize_workspace_url(host), profile_name
+            print_err(f"Pick a number between 1 and {len(profiles)}.")
+            continue
         try:
             return normalize_workspace_url(raw_value), None
         except ValueError as exc:

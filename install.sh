@@ -6,8 +6,9 @@
 # installs the latest ucode, then runs `ucode setup` which brings the Databricks
 # CLI, Node.js/npm, and the agent CLIs up to date and configures everything.
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/althrussell/ucode/main/install.sh | sh
+# Usage (note the `sh -c "$(...)"` form so stdin stays attached to your terminal
+# and the interactive workspace picker works):
+#   sh -c "$(curl -fsSL https://raw.githubusercontent.com/althrussell/ucode/main/install.sh)"
 #
 # Optional environment variables (for non-interactive / workshop rollout):
 #   UCODE_AGENTS=claude,codex      Agents to configure non-interactively.
@@ -81,19 +82,14 @@ else
 fi
 
 # 5. Provision dependencies + configure + validate via `ucode setup`.
+#
+# IMPORTANT: invoke this script as `sh -c "$(curl -fsSL <url>)"` (see the README),
+# NOT `curl ... | sh`. The former leaves stdin attached to your terminal so the
+# interactive workspace picker works; the latter makes stdin the piped script,
+# and ucode setup will then print non-interactive guidance instead of prompting.
 info "Running ucode setup"
 set --
 [ -n "${UCODE_AGENTS:-}" ]     && set -- "$@" --agents "${UCODE_AGENTS}"
 [ -n "${UCODE_PROFILE:-}" ]    && set -- "$@" --profile "${UCODE_PROFILE}"
 [ -n "${UCODE_WORKSPACES:-}" ] && set -- "$@" --workspaces "${UCODE_WORKSPACES}"
-
-# When invoked as `curl ... | sh`, this script's stdin is the piped script, not
-# the user's keyboard — so ucode's interactive workspace picker would abort with
-# "Input is not a terminal". Reconnect stdin to the controlling terminal when one
-# is available so prompts work; otherwise (true unattended/CI) run as-is and let
-# ucode setup print actionable guidance if it needs a workspace.
-if [ -r /dev/tty ]; then
-  exec "${UCODE_BIN}" setup "$@" < /dev/tty
-else
-  exec "${UCODE_BIN}" setup "$@"
-fi
+exec "${UCODE_BIN}" setup "$@"

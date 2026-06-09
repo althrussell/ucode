@@ -168,7 +168,7 @@ class TestPromptForWorkspace:
     def test_none_falls_through_to_manual_prompt(self):
         with (
             patch("ucode.ui.questionary.select") as mock_select,
-            patch("ucode.ui.console.input", return_value="https://manual.databricks.com"),
+            patch("builtins.input", return_value="https://manual.databricks.com"),
         ):
             mock_select.return_value.ask.return_value = None
             url, profile = prompt_for_workspace("desc", profiles=self.PROFILES)
@@ -180,7 +180,7 @@ class TestPromptForWorkspace:
         # different URL") instead of its value, we must not try to unpack it.
         with (
             patch("ucode.ui.questionary.select") as mock_select,
-            patch("ucode.ui.console.input", return_value="https://manual.databricks.com"),
+            patch("builtins.input", return_value="https://manual.databricks.com"),
         ):
             mock_select.return_value.ask.return_value = "Enter a different URL"
             url, profile = prompt_for_workspace("desc", profiles=self.PROFILES)
@@ -188,7 +188,30 @@ class TestPromptForWorkspace:
         assert profile is None
 
     def test_no_profiles_goes_straight_to_manual_prompt(self):
-        with patch("ucode.ui.console.input", return_value="example.databricks.com"):
+        with patch("builtins.input", return_value="example.databricks.com"):
             url, profile = prompt_for_workspace("desc", profiles=None)
         assert url == "https://example.databricks.com"
         assert profile is None
+
+    def test_oserror_from_tui_falls_back_to_text_menu(self):
+        # The real bug: prompt_toolkit's asyncio input reader raises OSError on
+        # terminals it can't register (e.g. under `curl | sh`). We must recover
+        # with the text menu, not crash.
+        with (
+            patch("ucode.ui.questionary.select") as mock_select,
+            patch("builtins.input", return_value="https://recovered.databricks.com"),
+        ):
+            mock_select.return_value.ask.side_effect = OSError(22, "Invalid argument")
+            url, profile = prompt_for_workspace("desc", profiles=self.PROFILES)
+        assert url == "https://recovered.databricks.com"
+        assert profile is None
+
+    def test_text_menu_accepts_numeric_selection(self):
+        with (
+            patch("ucode.ui.questionary.select") as mock_select,
+            patch("builtins.input", return_value="2"),
+        ):
+            mock_select.return_value.ask.side_effect = OSError(22, "Invalid argument")
+            url, profile = prompt_for_workspace("desc", profiles=self.PROFILES)
+        assert url == "https://b.databricks.com"
+        assert profile == "prof-b"

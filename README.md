@@ -27,7 +27,7 @@ Open your terminal and paste the one line for your operating system.
 **macOS / Linux** (paste into Terminal):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/althrussell/ucode/main/install.sh | sh
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/althrussell/ucode/main/install.sh)"
 ```
 
 **Windows** (paste into PowerShell — works whether you are in PowerShell or the

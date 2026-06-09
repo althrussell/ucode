@@ -28,12 +28,18 @@ dependency chain, none of which you install manually:
 ## 2. One-command install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/althrussell/ucode/main/install.sh | sh
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/althrussell/ucode/main/install.sh)"
 ```
 
 This installs/updates `uv`, provisions Python 3.12, installs the latest `ucode`,
 then runs `ucode setup` to update remaining dependencies and configure your
 agents.
+
+> Use the `sh -c "$(curl …)"` form shown above, **not** `curl … | sh`. The
+> `sh -c` form keeps your terminal attached to stdin so the interactive
+> workspace picker works. With `curl … | sh`, stdin is the piped script, so
+> `ucode setup` runs non-interactively and will ask you to pass `--workspaces`
+> (or set `UCODE_WORKSPACES`).
 
 Notes:
 
