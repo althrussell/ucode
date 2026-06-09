@@ -55,8 +55,12 @@ Write-Info "Provisioning Python $pyver via uv"
 try { uv python install $pyver } catch { Write-Warn "uv python install $pyver failed; uv will resolve an interpreter" }
 
 # 3. Install ucode (force = always latest, replaces a stale copy).
-Write-Info "Installing ucode from $repo@$ref"
-uv tool install --force --python $pyver "git+$repo@$ref"
+#
+# Install from the GitHub source tarball rather than `git+...` so a machine
+# without Git still works (uv's git source requires a Git executable). The
+# `<ref>.tar.gz` path accepts a branch, tag, or commit SHA.
+Write-Info "Installing ucode from $repo (ref $ref)"
+uv tool install --force --python $pyver "ucode @ $repo/archive/$ref.tar.gz"
 
 # 4. Resolve ucode by absolute path — do not rely on PATH refreshing mid-script.
 try { uv tool update-shell | Out-Null } catch {}

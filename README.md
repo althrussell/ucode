@@ -98,7 +98,7 @@ Already have `uv` and prefer to do it yourself? Install just the package and run
 setup:
 
 ```bash
-uv tool install git+https://github.com/althrussell/ucode
+uv tool install "ucode @ https://github.com/althrussell/ucode/archive/main.tar.gz"
 ucode setup
 ```
 

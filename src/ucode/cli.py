@@ -1160,12 +1160,13 @@ def upgrade_cmd() -> None:
     """Upgrade ucode to the latest version from GitHub."""
     import subprocess
 
-    git_url = "git+https://github.com/althrussell/ucode"
+    # Source tarball (not git+...) so upgrade works without a Git executable.
+    source = "ucode @ https://github.com/althrussell/ucode/archive/main.tar.gz"
     print_section("Upgrade")
-    print_kv("Source", git_url)
+    print_kv("Source", source)
     try:
         subprocess.run(
-            ["uv", "tool", "install", "--reinstall", git_url],
+            ["uv", "tool", "install", "--reinstall", source],
             check=True,
         )
     except FileNotFoundError:

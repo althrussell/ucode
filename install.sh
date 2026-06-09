@@ -66,8 +66,13 @@ uv python install "${PYTHON_VERSION}" \
   || warn "uv python install ${PYTHON_VERSION} failed; uv will resolve an interpreter"
 
 # 3. Install ucode (force = always latest, replaces a stale copy).
-info "Installing ucode from ${UCODE_REPO}@${UCODE_REF}"
-uv tool install --force --python "${PYTHON_VERSION}" "git+${UCODE_REPO}@${UCODE_REF}"
+#
+# Install from the GitHub source tarball rather than `git+...` so a machine
+# without Git still works (uv's git source requires a Git executable). The
+# `<ref>.tar.gz` path accepts a branch, tag, or commit SHA.
+info "Installing ucode from ${UCODE_REPO} (ref ${UCODE_REF})"
+uv tool install --force --python "${PYTHON_VERSION}" \
+  "ucode @ ${UCODE_REPO}/archive/${UCODE_REF}.tar.gz"
 
 # 4. Resolve ucode by absolute path — do not rely on PATH refreshing mid-script.
 uv tool update-shell >/dev/null 2>&1 || true
